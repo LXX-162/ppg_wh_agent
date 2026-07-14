@@ -1,0 +1,5 @@
+imap-tools
+pdfplumber
+python-dotenv
+requests
+pydantic
