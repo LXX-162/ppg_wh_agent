@@ -9,9 +9,9 @@ def load_config():
     load_dotenv()
     
     config = {
-        "IMAP_HOST": os.environ.get("IMAP_HOST"),
-        "IMAP_USER": os.environ.get("IMAP_USER"),
-        "IMAP_PASS": os.environ.get("IMAP_PASS"),
+        "IMAP_HOST": os.environ.get("IMAP_HOST") or os.environ.get("MAIL_HOST"),
+        "IMAP_USER": os.environ.get("IMAP_USER") or os.environ.get("MAIL_USER"),
+        "IMAP_PASS": os.environ.get("IMAP_PASS") or os.environ.get("MAIL_PASSWORD"),
         "FEISHU_APP_ID": os.environ.get("FEISHU_APP_ID"),
         "FEISHU_APP_SECRET": os.environ.get("FEISHU_APP_SECRET"),
     }

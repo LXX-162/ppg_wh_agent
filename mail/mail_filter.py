@@ -1,28 +1,24 @@
-import json
-import os
-import logging
-
-logger = logging.getLogger(__name__)
-
 class MailFilter:
-    def __init__(self, processed_uid_file="processed_uid.json"):
-        self.processed_uid_file = processed_uid_file
-        self.processed_uids = self._load_processed_uids()
-
-    def _load_processed_uids(self):
-        if os.path.exists(self.processed_uid_file):
-            with open(self.processed_uid_file, 'r', encoding='utf-8') as f:
-                return set(json.load(f))
-        return set()
-
-    def save_processed_uid(self, uid):
-        self.processed_uids.add(uid)
-        with open(self.processed_uid_file, 'w', encoding='utf-8') as f:
-            json.load(list(self.processed_uids), f)
-
-    def is_processed(self, uid):
-        return uid in self.processed_uids
-
-    def filter_by_sender_or_subject(self, sender, subject):
-        """根据发件人名单或标题关键词进行过滤"""
-        pass
+    @staticmethod
+    def get_type(mail):
+        """
+        根据发件人分类邮件类型
+        
+        :param mail: 邮件数据字典，需包含 'sender' 字段
+        :return: 返回分类字符串：PDF_ORDER, SHIPPING_INFO 或 UNKNOWN
+        """
+        if not mail or not isinstance(mail, dict):
+            return "UNKNOWN"
+            
+        sender = mail.get("sender", "").lower()
+        
+        # 匹配 Juan Wen (兼容 Wen, Juan 或 JuanWen 等形式)
+        if "juan" in sender and "wen" in sender:
+            return "PDF_ORDER"
+            
+        # 匹配 Xu Jiayi (兼容 Xu, Jiayi 或 JiayiXu 等形式)
+        if "xu" in sender and "jiayi" in sender:
+            return "SHIPPING_INFO"
+            
+        # 其他情况
+        return "UNKNOWN"

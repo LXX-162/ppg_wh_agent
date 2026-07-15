@@ -4,20 +4,35 @@ import logging
 logger = logging.getLogger(__name__)
 
 class PDFParser:
-    def __init__(self):
-        pass
-
-    def parse_pdf(self, file_path):
-        """解析PDF文件，提取文本和表格。由于要求含有表格即文字说明，此方法主要提取纯文本供大模型或正则处理。"""
-        logger.info(f"Parsing PDF: {file_path}")
+    @staticmethod
+    def parse_pdf(file_path: str) -> str:
+        """
+        提取 PDF 所有文字，按页面顺序拼接为字符串。
+        如果当前页面包含 "总毛重"，则停止继续读取后面的页面。
+        """
         text_content = []
+        
         try:
             with pdfplumber.open(file_path) as pdf:
-                for page in pdf.pages:
+                for i, page in enumerate(pdf.pages):
+                    page_num = i + 1
+                    logger.info(f"读取第 {page_num} 页: {file_path}")
+                    
                     text = page.extract_text()
-                    if text:
-                        text_content.append(text)
+                    
+                    # 避免空页
+                    if not text:
+                        continue
+                        
+                    text_content.append(text)
+                    
+                    # 停止条件
+                    if "总毛重" in text:
+                        logger.info(f"在第 {page_num} 页检测到 '总毛重'，停止读取后续页面。")
+                        break
+                        
             return "\n".join(text_content)
+            
         except Exception as e:
-            logger.error(f"Error parsing PDF {file_path}: {e}")
+            logger.error(f"解析 PDF 出错 {file_path}: {e}")
             return ""

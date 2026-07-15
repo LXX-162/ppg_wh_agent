@@ -1,33 +1,67 @@
 import imaplib
 import email
-from email.header import decode_header
+from email import policy
 import logging
+from utils.config import load_config
 
 logger = logging.getLogger(__name__)
 
 class MailReader:
-    def __init__(self, host, user, password, port=993):
-        self.host = host
-        self.user = user
-        self.password = password
-        self.port = port
+    def __init__(self):
+        config = load_config()
+        self.host = config.get("IMAP_HOST")
+        self.user = config.get("IMAP_USER")
+        self.password = config.get("IMAP_PASS")
+        self.port = 993
         self.mail = None
 
     def connect(self):
-        try:
-            self.mail = imaplib.IMAP4_SSL(self.host, self.port)
-            self.mail.login(self.user, self.password)
-            logger.info("Successfully connected to IMAP server.")
-        except Exception as e:
-            logger.error(f"Failed to connect to IMAP server: {e}")
-            raise
-
-    def fetch_unread_emails(self):
-        """获取未读邮件并返回其内容和附件"""
-        # 具体实现依赖于业务需求
-        pass
+        logger.info("连接邮箱...")
+        self.mail = imaplib.IMAP4_SSL(self.host, self.port)
+        self.mail.login(self.user, self.password)
+        logger.info("登录成功")
 
     def disconnect(self):
         if self.mail:
-            self.mail.logout()
-            logger.info("Disconnected from IMAP server.")
+            try:
+                self.mail.logout()
+            except Exception:
+                pass
+            self.mail = None
+
+    def fetch_recent(self, limit=20):
+        if not self.mail:
+            self.connect()
+
+        self.mail.select("INBOX")
+        status, response = self.mail.uid("SEARCH", None, "ALL")
+        if status != "OK":
+            logger.error("检索邮件失败")
+            return []
+
+        uids = response[0].split()
+        logger.info(f"读取邮件数量: {len(uids)}")
+
+        recent_uids = uids[-limit:] if limit else uids
+        mails = []
+
+        for uid in recent_uids:
+            status, fetch_data = self.mail.uid("FETCH", uid, "(RFC822)")
+            if status != "OK":
+                continue
+
+            for response_part in fetch_data:
+                if isinstance(response_part, tuple):
+                    msg_bytes = response_part[1]
+                    # 使用 default policy 自动处理 header 解码等
+                    msg = email.message_from_bytes(msg_bytes, policy=policy.default)
+                    
+                    mails.append({
+                        "uid": uid.decode('utf-8'),
+                        "sender": str(msg.get("From", "")),
+                        "subject": str(msg.get("Subject", "")),
+                        "date": str(msg.get("Date", "")),
+                        "message": msg
+                    })
+        
+        return mails
