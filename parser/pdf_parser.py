@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 import pdfplumber
 import logging
 

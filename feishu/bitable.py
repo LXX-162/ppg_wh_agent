@@ -64,3 +64,45 @@ class BitableClient:
         except Exception as e:
             logger.error(f"Exception when writing records to Feishu: {e}")
             return False
+
+    def get_records(self, app_token, table_id):
+        """拉取多维表中的所有记录"""
+        if not self.tenant_access_token:
+            self._get_tenant_access_token()
+            
+        if not self.tenant_access_token:
+            logger.error("No valid tenant_access_token, abort reading.")
+            return []
+
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+        headers = {
+            "Authorization": f"Bearer {self.tenant_access_token}"
+        }
+        
+        all_records = []
+        page_token = ""
+        has_more = True
+        
+        while has_more:
+            params = {"page_size": 500}
+            if page_token:
+                params["page_token"] = page_token
+                
+            try:
+                response = requests.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                data = response.json()
+                if data.get("code") == 0:
+                    items = data.get("data", {}).get("items", [])
+                    all_records.extend(items)
+                    
+                    has_more = data.get("data", {}).get("has_more", False)
+                    page_token = data.get("data", {}).get("page_token", "")
+                else:
+                    logger.error(f"Failed to get records: {data.get('msg')}")
+                    break
+            except Exception as e:
+                logger.error(f"Exception when getting records from Feishu: {e}")
+                break
+                
+        return all_records

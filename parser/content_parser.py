@@ -142,7 +142,23 @@ class ContentParser:
             return sub_text.strip()
 
     @staticmethod
-    def extract_order_no(text: str) -> str:
+    def extract_order_no(text: str, filename: str = "") -> str:
+        # 优先从文件名提取 11 开头的数字
+        if filename:
+            match = re.search(r'(11\d{6,})', filename)
+            if match:
+                result = match.group(1)
+                logger.info(f"提取 [单号] (来自文件名) -> 成功: True | 内容: {result}")
+                return result
+                
+        # 其次从文本里寻找孤立的 11 开头的数字 (比如发货单号)
+        match = re.search(r'(11\d{6,})', text)
+        if match:
+            result = match.group(1)
+            logger.info(f"提取 [单号] (来自文本发货单号) -> 成功: True | 内容: {result}")
+            return result
+            
+        # 兜底：原始的订单号逻辑
         match = re.search(r'订单号[:：]\s*([A-Za-z0-9_-]+)', text)
         result = match.group(1) if match else ""
         logger.info(f"提取 [单号] -> 成功: {bool(result)} | 内容: {result}")
@@ -164,12 +180,17 @@ class ContentParser:
 
     @staticmethod
     def extract_quantity(text: str) -> str:
-        match = re.search(r'Qty\s*\(数量\)[:：\s]*(\d+)', text)
-        if not match:
-            match = re.search(r'数量[:：\s]*(\d+)', text)
-        result = match.group(1) if match else ""
-        logger.info(f"提取 [数量] -> 成功: {bool(result)} | 内容: {result}")
-        return result
+        matches = re.findall(r'Qty\s*\(数量\)[:：\s]*(\d+)', text)
+        if not matches:
+            matches = re.findall(r'数量[:：\s]*(\d+)', text)
+            
+        if matches:
+            total = sum(int(m) for m in matches)
+            logger.info(f"提取 [数量] -> 成功: True | 累加结果: {total}")
+            return str(total)
+        else:
+            logger.info("提取 [数量] -> 成功: False | 内容: ")
+            return ""
 
     @staticmethod
     def extract_contact(text: str) -> str:
@@ -181,8 +202,8 @@ class ContentParser:
     def extract_address(text: str) -> str:
         result = ContentParser.extract_block(text, ["收货地址", "地址", "交货至"], ["订单号", "电话", "传真", "客户联系人", "Waybill"])
         if not result:
-            # 备用抽取逻辑
-            result_fallback = ContentParser.extract_block(text, ["客户:", "客户："], ["电话", "传真", "订单号"])
+            # 备用抽取逻辑 (扩展抓取范围到 Waybill 或 运输公司)
+            result_fallback = ContentParser.extract_block(text, ["客户:", "客户："], ["Waybill", "运输公司", "Carrier"])
             if result_fallback:
                 result = result_fallback
         logger.info(f"提取 [地址] -> 成功: {bool(result)} | 内容: {result}")
@@ -193,18 +214,18 @@ class ContentParser:
         result = ContentParser.extract_block(
             text, 
             ["客户要求"], 
-            ["客户签收", "Customer Receive", "数量", "总毛重", "联系人", "Org/Warehouse", "操作人"]
+            ["UN No.", "UN None", "Description", "Item Ord.Qty", "Shipped Qty", "总毛重"]
         )
         logger.info(f"提取 [客户要求] -> 成功: {bool(result)} | 内容: {result}")
         return result
 
     @staticmethod
-    def parse_pdf_text(raw_text: str) -> dict:
+    def parse_pdf_text(raw_text: str, filename: str = "") -> dict:
         norm_text = ContentParser.normalize_text(raw_text)
         
         logger.info("=== 开始解析 PDF 字段 ===")
         
-        order_no = ContentParser.extract_order_no(norm_text)
+        order_no = ContentParser.extract_order_no(norm_text, filename)
         order_date = ContentParser.extract_order_date(norm_text)
         address = ContentParser.extract_address(norm_text)
         contact = ContentParser.extract_contact(norm_text)

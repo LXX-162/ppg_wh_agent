@@ -2,5 +2,93 @@
     "419624": {
         "shipping": "",
         "danger": "BL48"
+    },
+    "11966451": {
+        "shipping": "零担",
+        "danger": ""
+    },
+    "11966553": {
+        "shipping": "零担",
+        "danger": ""
+    },
+    "11967570": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11967722": {
+        "shipping": "包车",
+        "danger": "NDG"
+    },
+    "11967724": {
+        "shipping": "包车",
+        "danger": "NDG"
+    },
+    "11967725": {
+        "shipping": "包车",
+        "danger": "NDG"
+    },
+    "11967726": {
+        "shipping": "包车",
+        "danger": "NDG"
+    },
+    "11967743": {
+        "shipping": "包车",
+        "danger": "NDG"
+    },
+    "11967745": {
+        "shipping": "包车",
+        "danger": "NDG"
+    },
+    "11967748": {
+        "shipping": "包车",
+        "danger": "NDG"
+    },
+    "11967752": {
+        "shipping": "包车",
+        "danger": "NDG"
+    },
+    "11967800": {
+        "shipping": "包车",
+        "danger": "NDG"
+    },
+    "11967838": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11968168": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11969193": {
+        "shipping": "保温车",
+        "danger": ""
+    },
+    "11964698": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11964976": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11965064": {
+        "shipping": "包车",
+        "danger": "DG"
+    },
+    "11965101": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11965943": {
+        "shipping": "包车",
+        "danger": "DG"
+    },
+    "11965776": {
+        "shipping": "零担",
+        "danger": ""
+    },
+    "11969351": {
+        "shipping": "包车",
+        "danger": ""
     }
 }

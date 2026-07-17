@@ -14,6 +14,8 @@ def load_config():
         "IMAP_PASS": os.environ.get("IMAP_PASS") or os.environ.get("MAIL_PASSWORD"),
         "FEISHU_APP_ID": os.environ.get("FEISHU_APP_ID"),
         "FEISHU_APP_SECRET": os.environ.get("FEISHU_APP_SECRET"),
+        "FEISHU_BITABLE_APP_TOKEN": os.environ.get("FEISHU_BITABLE_APP_TOKEN"),
+        "FEISHU_RECEIVER_TABLE_ID": os.environ.get("FEISHU_RECEIVER_TABLE_ID"),
     }
     
     # 验证关键配置是否存在
