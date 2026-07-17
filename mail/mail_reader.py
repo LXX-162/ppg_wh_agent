@@ -29,18 +29,18 @@ class MailReader:
                 pass
             self.mail = None
 
-    def fetch_recent(self, limit=20):
+    def fetch_recent(self, limit=20, search_criteria="ALL"):
         if not self.mail:
             self.connect()
 
         self.mail.select("INBOX")
-        status, response = self.mail.uid("SEARCH", None, "ALL")
+        status, response = self.mail.uid("SEARCH", None, search_criteria)
         if status != "OK":
-            logger.error("检索邮件失败")
+            logger.error(f"检索邮件失败: {search_criteria}")
             return []
 
         uids = response[0].split()
-        logger.info(f"读取邮件数量: {len(uids)}")
+        logger.info(f"搜索条件 '{search_criteria}' 匹配到邮件数量: {len(uids)}")
 
         recent_uids = uids[-limit:] if limit else uids
         mails = []

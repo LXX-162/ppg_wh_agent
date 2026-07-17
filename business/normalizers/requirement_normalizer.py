@@ -14,11 +14,12 @@ class RequirementNormalizer:
         noise_patterns = [
             r'Customer Receive',
             r'客户签收[：:]?',
-            r'Cust Po[：:]?\s*[A-Za-z0-9_-]+',
-            r'客户[：:]?\s*\d+',
+            r'Cust Po[：:]?[ \t]*[A-Za-z0-9_\-\s\u4e00-\u9fa5]+?(?=(Org/Warehouse|客户[：:]|操作人|Approve|Prebuild|[\r\n]|$))',
+            r'客户[：:]\s*[A-Za-z0-9_\-\s\u4e00-\u9fa5]+?(?=(Org/Warehouse|Cust Po[：:]|操作人|Approve|Prebuild|[\r\n]|$))',
             r'Org/Warehouse[：:]?\s*[A-Za-z0-9_/]+',
             r'操作人[：:]?\s*[A-Za-z0-9_]+',
-            r'Approve'
+            r'Approve',
+            r'Prebuild[A-Za-z0-9_\-&]+'
         ]
         
         cleaned = requirement

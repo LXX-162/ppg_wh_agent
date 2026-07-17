@@ -39,7 +39,7 @@ class ContentParser:
         data_start = -1
         
         for i in range(header_start, len(lines)):
-            if re.match(r'^\d{4}/\d{1,2}/\d{1,2}$', lines[i]):
+            if re.match(r'^(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})$', lines[i]):
                 data_start = i
                 break
             headers.append(lines[i])
@@ -60,20 +60,34 @@ class ContentParser:
             delivery_idx = 2
             
         result = {}
-        record_len = len(headers)
-        i = data_start
         
-        while i < len(lines):
-            chunk = lines[i : i + record_len]
+        # 将 data 分割成 blocks
+        blocks = []
+        current_block = []
+        date_pattern = re.compile(r'^(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})$')
+        
+        for i in range(data_start, len(lines)):
+            line = lines[i]
+            if not line:
+                continue
+            if date_pattern.match(line):
+                if current_block:
+                    blocks.append(current_block)
+                current_block = [line]
+            else:
+                if current_block:
+                    current_block.append(line)
+                    
+        if current_block:
+            blocks.append(current_block)
             
-            if not chunk or not re.match(r'^\d{4}/\d{1,2}/\d{1,2}$', chunk[0]):
-                break
-                
-            if len(chunk) > delivery_idx:
-                delivery_no = chunk[delivery_idx]
+        for block in blocks:
+            if len(block) > delivery_idx:
+                delivery_no = block[delivery_idx]
                 
                 danger = ""
-                for item in chunk:
+                # 如果这个块中存在单独一行的 DG 或 NDG
+                for item in block:
                     item_upper = item.upper()
                     if item_upper in ["DG", "NDG"]:
                         danger = item_upper
@@ -84,8 +98,6 @@ class ContentParser:
                     "danger": danger
                 }
                 
-            i += record_len
-            
         return result
 
     # ================= PDF 解析重构区域 =================
@@ -143,7 +155,39 @@ class ContentParser:
 
     @staticmethod
     def extract_order_no(text: str, filename: str = "") -> str:
-        # 优先从文件名提取 11 开头的数字
+        # 1. 优先通过正文的“发货单号:”来识别，过滤掉中间可能的乱码（比如二维码）
+        match = re.search(r'发货单号\s*[:：]([\s\S]{0,100})', text)
+        if match:
+            chunk = match.group(1)
+            # 策略A: 连续的11开头的长数字 (处理跨行但数字连续的情况，例如换行后的 11965813)
+            m2 = re.search(r'(11\d{6,})', chunk)
+            if m2:
+                result = m2.group(1)
+                logger.info(f"提取 [单号] (来自文本发货单号-连续) -> 成功: True | 内容: {result}")
+                return result
+                
+            # 策略B: 数字被乱码打断的情况，比如 Í11+9Ä6\6r0Ã82Î -> 11966082
+            first_line = chunk.split('\n')[0]
+            digits_only = re.sub(r'\D', '', first_line)
+            if digits_only.startswith('11') and len(digits_only) >= 8:
+                logger.info(f"提取 [单号] (来自文本发货单号-乱码过滤) -> 成功: True | 内容: {digits_only}")
+                return digits_only
+            
+        # 2. 次选兜底逻辑：订单号
+        match = re.search(r'订单号[:：]\s*([A-Za-z0-9_-]+)', text)
+        if match:
+            result = match.group(1)
+            logger.info(f"提取 [单号] (来自文本订单号) -> 成功: True | 内容: {result}")
+            return result
+            
+        # 3. 再次选逻辑：文本里孤立的 11 开头的数字
+        match = re.search(r'(11\d{6,})', text)
+        if match:
+            result = match.group(1)
+            logger.info(f"提取 [单号] (来自孤立数字) -> 成功: True | 内容: {result}")
+            return result
+            
+        # 4. 最后才从文件名提取（因为用户反映有时候文件名命名会和里面不一致，因此优先级降到最低）
         if filename:
             match = re.search(r'(11\d{6,})', filename)
             if match:
@@ -151,18 +195,8 @@ class ContentParser:
                 logger.info(f"提取 [单号] (来自文件名) -> 成功: True | 内容: {result}")
                 return result
                 
-        # 其次从文本里寻找孤立的 11 开头的数字 (比如发货单号)
-        match = re.search(r'(11\d{6,})', text)
-        if match:
-            result = match.group(1)
-            logger.info(f"提取 [单号] (来自文本发货单号) -> 成功: True | 内容: {result}")
-            return result
-            
-        # 兜底：原始的订单号逻辑
-        match = re.search(r'订单号[:：]\s*([A-Za-z0-9_-]+)', text)
-        result = match.group(1) if match else ""
-        logger.info(f"提取 [单号] -> 成功: {bool(result)} | 内容: {result}")
-        return result
+        logger.info(f"提取 [单号] -> 成功: False | 内容: ")
+        return ""
 
     @staticmethod
     def extract_order_date(text: str) -> str:
@@ -195,17 +229,46 @@ class ContentParser:
     @staticmethod
     def extract_contact(text: str) -> str:
         result = ContentParser.extract_block(text, ["客户联系人", "联系人"], ["PPG联系人", "运输公司", "承运商", "发货单号", "电话"])
+        if not result:
+            # 使用更宽泛的正则去寻找 scrambled 的联系人行，例如 "客P户G联联系系人人"
+            match = re.search(r'客.*?户.*?联.*?系.*?人.*?(?:[:：\?？]+)(.*?)(?:PPG|运输|承运|发货单号|电话|\n|$)', text, re.IGNORECASE)
+            if match:
+                result = match.group(1).strip()
         logger.info(f"提取 [联系人] -> 成功: {bool(result)} | 内容: {result}")
         return result
 
     @staticmethod
     def extract_address(text: str) -> str:
-        result = ContentParser.extract_block(text, ["收货地址", "地址", "交货至"], ["订单号", "电话", "传真", "客户联系人", "Waybill"])
+        # 首选明确的标签，加上冒号防止匹配到页底的"公司地址"
+        result = ContentParser.extract_block(text, ["收货地址:", "收货地址：", "交货至:", "交货至："], ["订单号", "电话", "传真", "客户联系人", "Waybill"])
         if not result:
-            # 备用抽取逻辑 (扩展抓取范围到 Waybill 或 运输公司)
-            result_fallback = ContentParser.extract_block(text, ["客户:", "客户："], ["Waybill", "运输公司", "Carrier"])
+            # 备用抽取逻辑：从客户向下找，直到运输公司或发货单号或客户联系人
+            result_fallback = ContentParser.extract_block(text, ["客户:", "客户："], ["运输公司", "Carrier", "发货单号", "客户联系人"])
             if result_fallback:
-                result = result_fallback
+                lines = [line.strip() for line in result_fallback.splitlines() if line.strip()]
+                
+                # 寻找起步界限 (Frt bill 或 电话 或 SBU)
+                start_idx = 0
+                for i, line in enumerate(lines):
+                    if "Frt bill" in line or "SBU:" in line or "电话" in line:
+                        start_idx = i
+                        break
+                        
+                # 收集起步界限之后直到倒数第二行的所有行 (倒数第一行通常是 城市, 省份, 邮编)
+                if len(lines) > 1:
+                    address_lines = lines[start_idx:-1]
+                    result = " ".join(address_lines)
+                else:
+                    result = result_fallback
+                    
+                # 进一步清理带入的噪声
+                result = re.sub(r'(?:电话|传真|Frt bill|SBU)[:：]\s*[\d\-\sA-Za-z]+', ' ', result)
+                result = re.sub(r'Waybill:?', ' ', result, flags=re.IGNORECASE)
+                result = re.sub(r'订单号[:：]\s*[A-Za-z0-9]+', ' ', result)
+                result = re.sub(r'月结库|月结仓', ' ', result)
+
+                result = re.sub(r'\s+', ' ', result).strip()
+                
         logger.info(f"提取 [地址] -> 成功: {bool(result)} | 内容: {result}")
         return result
 

@@ -36,7 +36,8 @@ def test_7_14_pipeline():
     mails = []
     for attempt in range(3):
         try:
-            mails = reader.fetch_recent(limit=300) 
+            # 搜索 7月13日 至今的所有邮件，因为 7.14 的订单可能是 15/16/17 号才发货！
+            mails = reader.fetch_recent(limit=None, search_criteria='(SINCE "13-Jul-2026")') 
             break
         except Exception as e:
             print(f"Fetch attempt {attempt + 1} failed: {e}")
@@ -46,7 +47,7 @@ def test_7_14_pipeline():
         print("Failed to fetch emails after multiple attempts.")
         return
     
-    target_orders = []
+    target_orders_dict = {}
     
     # 2. 先扫一遍，更新所有的 shipping 缓存 (确保字典是最新的)
     for m in mails:
@@ -108,17 +109,17 @@ def test_7_14_pipeline():
                         if not order_no or len(order_no) < 4 or not any(c.isdigit() for c in order_no):
                             continue
                             
-                        shipping_info = shipping_cache.get(order_no, {})
-                        normalized_dict["发运方式"] = shipping_info.get("shipping", "")
-                        normalized_dict["危险品类别"] = shipping_info.get("danger", "")
-                        
-                        target_orders.append(normalized_dict)
+                        # 去重逻辑：如果有重复orderno，后面的覆盖前面的
+                        target_orders_dict[order_no] = normalized_dict
         except Exception as e:
-            pass
+            import traceback
+            print(f"Error processing email {m.get('uid')}: {e}")
+            traceback.print_exc()
             
     reader.disconnect()
             
-    print(f"\n成功解析并结合了本地 {len(target_orders)} 个订单，正在保存到文件...")
+    target_orders = list(target_orders_dict.values())
+    print(f"\n成功解析并结合了本地 {len(target_orders)} 个订单（已按订单号去重），正在保存到文件...")
     
     # 将 JSON 结果保存到文件里，方便用户自行查看
     output_path = os.path.join(os.path.dirname(__file__), "..", "output", "test_7_14_orders.json")

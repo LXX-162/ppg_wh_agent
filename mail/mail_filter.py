@@ -7,7 +7,9 @@ class MailFilter:
     
     SHIPPING_INFO_CONTACTS = [
         "xu jiayi",
+        "jiayixu@ppg.com",
         "he jinlan",  # 兼容 He, Jinlan / JHe@ppg.com 等形式
+        "jhe@ppg.com",
         # 后续新增物流信息发件人加在这里
     ]
     

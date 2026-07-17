@@ -15,7 +15,7 @@ class AddressNormalizer:
         address = order.get("address", "")
         
         # 提取标准中文地址的精准正则：必须以 省/市/区 开启，并使用贪婪匹配到最后一个结尾词
-        addr_pattern = r'([\u4e00-\u9fa5]{2,8}(?:省|市|区|自治区|自治州)[\u4e00-\u9fa5A-Za-z0-9_ \-（）\(\)]+(?:号|公司|集团|厂|仓库|基地|中心|车间|工业园|园区|区)[）\)]?)'
+        addr_pattern = r'([\u4e00-\u9fa5]{2,20}(?:省|市|自治区|自治州|实验区|开发区|新区|高新区|县)[\u4e00-\u9fa5A-Za-z0-9_ \-（）\(\)、「」、，\?？\ufffd]+(?:号|公司|集团|厂|仓库|基地|中心|车间|工业园|园区|区|东|南|西|北|侧|路|街|道|弄)[）\)]?)'
         
         # 1. 优先从客户要求中提取地址
         if requirement:
@@ -30,14 +30,13 @@ class AddressNormalizer:
         # 剔除各种杂音
         address = re.sub(r'实际发货[:：].*?(?=\n|$)', ' ', address, flags=re.IGNORECASE)
         address = re.sub(r'PPG\s*涂料（[^）]+）有限公司|庞贝捷涂料（[^）]+）有限公司', ' ', address)
-        address = re.sub(r'Frt bill.*?(?=\n|$)', ' ', address, flags=re.IGNORECASE)
-        # 剔除带有 "电话:" 的
-        address = re.sub(r'电话[:：]?[A-Za-z0-9-\s]+', ' ', address)
-        # 剔除游离的 86-xxxx 电话
+        # 2. 从原 address 字段提取
+        # 预清理：去掉常见的前缀干扰项
+        address = re.sub(r'(?:Frt bill|SBU)[:：]?\s*[A-Za-z0-9_]*', ' ', address, flags=re.IGNORECASE)
+        address = re.sub(r'电话[:：]?\s*[\d\-]*', ' ', address)
         address = re.sub(r'(?<!\d)86\s*-?\s*\d{2,3}\s*-?\s*\d{4}\s*-?\s*\d{4}', ' ', address)
-        # 剔除订单号和 Waybill
-        address = re.sub(r'订单号[:：]?\s*[A-Za-z0-9_-]+', ' ', address)
-        address = re.sub(r'Waybill[:：]?\s*[A-Za-z0-9_-]*', ' ', address)
+        address = re.sub(r'订单号[:：]?\s*[A-Za-z0-9_-]*', ' ', address)
+        address = re.sub(r'Waybill[:：]?\s*[A-Za-z0-9_-]*', ' ', address, flags=re.IGNORECASE)
         
         # 把多个连续换行和空格统一为单个空格
         address = re.sub(r'[\r\n]+', ' ', address)
@@ -93,20 +92,36 @@ class AddressNormalizer:
             receivers = []
             for record in records:
                 fields = record.get("fields", {})
-                # 获取“收货单位简称”列的值
-                name = fields.get("收货单位简称")
-                if name:
-                    # 有些时候可能返回列表形式（如多选字段或文本），确保转为字符串
-                    if isinstance(name, list) and len(name) > 0:
-                        name = name[0]
-                    if isinstance(name, dict) and "text" in name:
-                        name = name["text"]
+                
+                # 获取 收货单位 或 收货单位简称
+                receiver_name = fields.get("收货单位") or fields.get("收货单位简称")
+                address_text = fields.get("收货地址")
+                
+                if receiver_name and address_text:
+                    if isinstance(receiver_name, list) and len(receiver_name) > 0:
+                        receiver_name = receiver_name[0]
+                    if isinstance(receiver_name, dict) and "text" in receiver_name:
+                        receiver_name = receiver_name["text"]
                         
-                    name_str = str(name).strip()
-                    if name_str:
-                        receivers.append(name_str)
+                    if isinstance(address_text, list) and len(address_text) > 0:
+                        address_text = address_text[0]
+                    if isinstance(address_text, dict) and "text" in address_text:
+                        address_text = address_text["text"]
+                        
+                    receiver_str = str(receiver_name).strip()
+                    address_str = str(address_text).strip()
+                    
+                    if receiver_str and address_str:
+                        # 剔除地址中的所有空格和标点符号，做成高密度字符串，方便模糊匹配
+                        address_dense = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', address_str)
+                        if address_dense:
+                            receivers.append({
+                                "receiver": receiver_str,
+                                "address": address_dense,
+                                "raw_address": address_str
+                            })
             
-            logger.info(f"成功从飞书多维表格加载了 {len(receivers)} 个收货单位。")
+            logger.info(f"成功从飞书多维表格加载了 {len(receivers)} 个收货单位映射。")
             cls._cached_receiver_list = receivers
         except Exception as e:
             logger.error(f"Failed to load receivers from Feishu: {e}")
@@ -124,6 +139,8 @@ class AddressNormalizer:
         requirement = order.get("requirement", "")
         text_pool = f"{raw_address} {requirement}"
         
+        text_pool_dense = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', text_pool)
+        
         def can_partition(s, text):
             n = len(s)
             dp = [False] * (n + 1)
@@ -132,26 +149,31 @@ class AddressNormalizer:
                 for j in range(i):
                     if dp[j]:
                         chunk = s[j:i]
-                        # 允许的最小 chunk 长度为 2，以防止单个字（如“厂”、“库”）造成的过度匹配
+                        # 允许的最小 chunk 长度为 2，以防止单个字造成的过度匹配
                         if len(chunk) >= 2 and chunk in text:
                             dp[i] = True
                             break
             return dp[n]
             
-        matched_receivers = []
-        for receiver in receiver_list:
-            # 如果收货单位名称少于2个字，直接全字匹配
-            if len(receiver) < 2:
-                if receiver in text_pool:
-                    matched_receivers.append(receiver)
+        matched_records = []
+        for record in receiver_list:
+            bitable_addr = record["address"]
+            
+            # 如果地址过短，直接要求全字匹配
+            if len(bitable_addr) < 2:
+                if bitable_addr in text_pool_dense:
+                    matched_records.append(record)
             else:
-                if can_partition(receiver, text_pool):
-                    matched_receivers.append(receiver)
+                if bitable_addr in text_pool_dense or can_partition(bitable_addr, text_pool_dense):
+                    matched_records.append(record)
                 
-        if matched_receivers:
-            # 优先选择匹配到的名字最长的（越长越精确）
-            best_match = max(matched_receivers, key=len)
-            order["receiver"] = best_match
+        if matched_records:
+            # 优先选择地址最长的（包含特征信息最多，越长越精确）
+            best_match = max(matched_records, key=lambda x: len(x["address"]))
+            order["receiver"] = best_match["receiver"]
+            
+            # 如果匹配到的地址有明显的城市/省份信息，但是原 address 没有提取好，这里甚至可以用 raw_address 覆盖
+            # 不过目前只负责收货单位匹配
         else:
             order["receiver"] = ""
             
