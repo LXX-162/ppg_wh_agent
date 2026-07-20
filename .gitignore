@@ -27,5 +27,23 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# 数据文件
+# PDF / 测试文件
 file/pdf/
+file/pdf_test/
+file/pdf_test_run/
+
+# 测试脚本
+test/
+
+# 输出文件
+output/cache/
+output/*.json
+output/*.txt
+
+# 根目录下的转储/临时文件
+receivers_dump.json
+shipping_emails_dump.txt
+matches.json
+output.txt
+test_pdf_texts.txt
+test_check.txt

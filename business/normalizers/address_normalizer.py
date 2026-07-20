@@ -183,7 +183,12 @@ class AddressNormalizer:
 
             best_match = max(exact_matches, key=get_receiver_score)
             order["receiver"] = best_match["receiver"]
-            order["address_exact_match"] = "Y"
+            
+            if len(exact_matches) > 1:
+                order["address_exact_match"] = "Q"
+            else:
+                order["address_exact_match"] = "Y"
+                
             return order
             
         # 2. 如果没有一模一样的地址，再利用文本池进行模糊匹配
@@ -219,7 +224,22 @@ class AddressNormalizer:
             order["receiver"] = best_match["receiver"]
             order["address_exact_match"] = "N"
         else:
-            order["receiver"] = ""
+            # 兜底：即使没有任何记录通过模糊匹配，也从全库中挑出得分最高的一条
+            # 按收货单位名称与文本池的字符重合度评分
+            def score_record(rec):
+                name = rec["receiver"]
+                addr = rec["address"]
+                # 收货单位名称出现在文本池中
+                name_score = sum(1 for c in name if c in text_pool_dense) * 2
+                # 地址字符与文本池的重合度
+                addr_score = sum(1 for c in addr if c in text_pool_dense)
+                return name_score + addr_score
+            
+            if receiver_list:
+                best_fallback = max(receiver_list, key=score_record)
+                order["receiver"] = best_fallback["receiver"]
+            else:
+                order["receiver"] = ""
             order["address_exact_match"] = "N"
             
         return order
@@ -227,5 +247,40 @@ class AddressNormalizer:
     @classmethod
     def normalize_city(cls, order: dict) -> dict:
         """业务修正规则：城市提取"""
-        # TODO: 从地址中正则提取出省/市
+        import sys, os
+        old_stdout = sys.stdout
+        sys.stdout = open(os.devnull, 'w')
+        try:
+            # pyrefly: ignore [missing-import]
+            import jionlp as jio
+        except Exception:
+            jio = None
+        finally:
+            sys.stdout.close()
+            sys.stdout = old_stdout
+            
+        address = order.get("address", "")
+        if jio and address:
+            try:
+                res = jio.parse_location(address)
+                province = res.get("province", "")
+                city = res.get("city", "")
+                county = res.get("county", "")
+                
+                # 直辖市/特殊城市处理
+                if province in ["北京市", "天津市", "上海市", "重庆市"]:
+                    city = province
+                
+                # 针对一些没有明确市的情况（如海南省直辖县级），使用 county 作为城市补充
+                if province and (not city or city == "直辖县级" or city == "省直辖县级行政区划"):
+                    if county:
+                        city = county
+                        
+                if province:
+                    order["到货省份"] = province
+                if city:
+                    order["到货城市"] = city
+            except Exception:
+                pass
+                
         return order
