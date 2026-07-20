@@ -35,13 +35,16 @@ class FieldNormalizer:
         order = ContactNormalizer.normalize(order)
         
         # 地址与收货单位相关
-        # 注意：先匹配收货单位（以便利用未被覆盖的原始地址字符串中的公司名）
-        order = AddressNormalizer.normalize_receiver(order)
+        order["raw_address"] = order.get("address", "")
         order = AddressNormalizer.normalize_address(order)
+        order = AddressNormalizer.normalize_receiver(order)
         order = AddressNormalizer.normalize_city(order)
         
         # 物流与危管
         order = LogisticsNormalizer.normalize_shipping(order)
         order = LogisticsNormalizer.normalize_danger(order)
+        
+        # 移除内部临时辅助字段，防止输出到 JSON
+        order.pop("raw_address", None)
         
         return order

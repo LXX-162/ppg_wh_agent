@@ -14,8 +14,17 @@ class AddressNormalizer:
         requirement = order.get("requirement", "")
         address = order.get("address", "")
         
+        # 0. 针对武汉恒基达鑫 / 化工五路的特殊处理
+        req_clean = requirement.replace(" ", "")
+        addr_clean = address.replace(" ", "")
+        if "恒基达鑫" in req_clean or "恒基达鑫" in addr_clean or ("化工五路" in req_clean and "武汉" in req_clean):
+            order["address"] = "湖北省武汉市洪山区化工五路1号武汉恒基达鑫国际化工仓储有限公司"
+            return order
+            
         # 提取标准中文地址的精准正则：必须以 省/市/区 开启，并使用贪婪匹配到最后一个结尾词
-        addr_pattern = r'([\u4e00-\u9fa5]{2,20}(?:省|市|自治区|自治州|实验区|开发区|新区|高新区|县)[\u4e00-\u9fa5A-Za-z0-9_ \-（）\(\)、「」、，\?？\ufffd]+(?:号|公司|集团|厂|仓库|基地|中心|车间|工业园|园区|区|东|南|西|北|侧|路|街|道|弄)[）\)]?)'
+        # 优化：1. 省/市名前缀不允许含有公司、有限等词，防止将公司名部分错误匹配为地址前部。
+        #       2. 增加了口、楼、门、栋、座、室等结尾词，确保“交叉口”、“1号楼”、“5号门”等行尾细节信息能够被完整匹配。
+        addr_pattern = r'((?:(?![公司有限集团厂仓库物流股份])[\u4e00-\u9fa5]){2,10}(?:省|市|自治区|自治州|实验区|开发区|新区|高新区|县)[\u4e00-\u9fa5A-Za-z0-9_ \-（）\(\)、「」、，\?？\ufffd]+(?:号|公司|集团|厂|仓库|基地|中心|车间|工业园|园区|区|东|南|西|北|侧|路|街|道|弄|口|楼|门|栋|座|室)[）\)]?)'
         
         # 1. 优先从客户要求中提取地址
         if requirement:
@@ -52,6 +61,13 @@ class AddressNormalizer:
             if addr_match:
                 final_addr = addr_match.group(1).replace('\n', ' ').strip()
                 final_addr = re.sub(r'(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])', '', final_addr)
+                
+                # 特殊情况：如果匹配到的地址前有括号括起的附属信息（如 (麦尔总部)），且这一行确实确定为地址，则前面的括号内容一起保留
+                prefix = address[:addr_match.start(1)].strip()
+                parenthesis_match = re.search(r'([\(（][^\)）]+[\)）])\s*$', prefix)
+                if parenthesis_match:
+                    final_addr = parenthesis_match.group(1) + final_addr
+                    
                 order["address"] = final_addr
                 return order
                 
@@ -135,12 +151,42 @@ class AddressNormalizer:
         # 动态获取收货单位列表 (带缓存)
         receiver_list = cls.get_receiver_list()
         
-        raw_address = order.get("address", "")
+        # 1. 优先尝试一模一样的地址匹配 (精准匹配)
+        # 用已经清洗规范化后的 order["address"]
+        normalized_addr = order.get("address", "")
+        norm_addr_dense = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', normalized_addr)
+        
+        raw_address = order.get("raw_address") or order.get("address", "")
         requirement = order.get("requirement", "")
         text_pool = f"{raw_address} {requirement}"
-        
         text_pool_dense = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', text_pool)
         
+        exact_matches = []
+        if norm_addr_dense:
+            for record in receiver_list:
+                if norm_addr_dense == record["address"]:
+                    exact_matches.append(record)
+                    
+        if exact_matches:
+            # 如果有多个相同地址的记录，通过收货单位名称在文本池中的匹配度来决定最优收货单位
+            def get_receiver_score(rec):
+                name = rec["receiver"]
+                # 1. 收货单位名称完整出现在文本池中
+                if name in text_pool:
+                    return 100 + len(name)
+                # 2. 特殊同义词处理：如 "武汉库" 对比 "武汉仓库" 或 "Wuhan Warehouse"
+                if name == "武汉库" and ("武汉仓库" in text_pool or "Wuhan Warehouse" in text_pool):
+                    return 95
+                # 3. 字符重合度
+                char_match_count = sum(1 for c in name if c in text_pool_dense)
+                return char_match_count
+
+            best_match = max(exact_matches, key=get_receiver_score)
+            order["receiver"] = best_match["receiver"]
+            order["address_exact_match"] = "Y"
+            return order
+            
+        # 2. 如果没有一模一样的地址，再利用文本池进行模糊匹配
         def can_partition(s, text):
             n = len(s)
             dp = [False] * (n + 1)
@@ -171,11 +217,10 @@ class AddressNormalizer:
             # 优先选择地址最长的（包含特征信息最多，越长越精确）
             best_match = max(matched_records, key=lambda x: len(x["address"]))
             order["receiver"] = best_match["receiver"]
-            
-            # 如果匹配到的地址有明显的城市/省份信息，但是原 address 没有提取好，这里甚至可以用 raw_address 覆盖
-            # 不过目前只负责收货单位匹配
+            order["address_exact_match"] = "N"
         else:
             order["receiver"] = ""
+            order["address_exact_match"] = "N"
             
         return order
 

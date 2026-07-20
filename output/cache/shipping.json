@@ -1442,5 +1442,413 @@
     "11971464": {
         "shipping": "零担",
         "danger": "DG"
+    },
+    "11971481": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11971485": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971490": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971821": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971822": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11971824": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971825": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971826": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11971830": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971880": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11971891": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971895": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971900": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971902": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971907": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971910": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971928": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971881": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971897": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971903": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971911": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971927": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11971968": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972029": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972033": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972061": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972066": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11972070": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972073": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972079": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972080": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11972081": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972083": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972084": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972076": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11972101": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972102": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11971975": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972150": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972154": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972157": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11972165": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972181": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972103": {
+        "shipping": "自提",
+        "danger": "DG"
+    },
+    "11972118": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972220": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972221": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972222": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11972233": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972234": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972236": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972282": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972287": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11972316": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973242": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973247": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973248": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973253": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973334": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973349": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973311": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973370": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973377": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973421": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973426": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973447": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11973459": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973466": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973471": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973474": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973478": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973519": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973522": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973525": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973573": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973576": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973580": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973585": {
+        "shipping": "零担",
+        "danger": "NDG"
+    },
+    "11973593": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973598": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973600": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973604": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973610": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973635": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973650": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973677": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973684": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973687": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973689": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973703": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973653": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973655": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973656": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973658": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973660": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973783": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973821": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973834": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973838": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11973842": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11974016": {
+        "shipping": "零担",
+        "danger": "DG"
+    },
+    "11974024": {
+        "shipping": "包车",
+        "danger": "DG"
     }
 }
