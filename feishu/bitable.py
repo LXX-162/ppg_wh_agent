@@ -174,3 +174,69 @@ class BitableClient:
 
         return deleted
 
+    def update_record(self, app_token: str, table_id: str, record_id: str, fields: dict) -> bool:
+        """更新单条记录的指定字段。"""
+        if not self.tenant_access_token:
+            self._get_tenant_access_token()
+        if not self.tenant_access_token:
+            logger.error("No valid tenant_access_token, abort update.")
+            return False
+
+        url = (f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}"
+               f"/tables/{table_id}/records/{record_id}")
+        headers = {
+            "Authorization": f"Bearer {self.tenant_access_token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = requests.put(url, headers=headers, json={"fields": fields})
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") == 0:
+                return True
+            else:
+                logger.error(f"更新记录 {record_id} 失败: {data.get('msg')}")
+                return False
+        except Exception as e:
+            logger.error(f"更新记录 {record_id} 异常: {e}")
+            return False
+
+    def batch_update_records(self, app_token: str, table_id: str,
+                             updates: list) -> int:
+        """
+        批量更新记录。
+        updates: [ {"record_id": "...", "fields": {...}}, ... ]
+        返回成功更新的条数。
+        每批调用飞书 batch_update 接口（最多 500 条）。
+        """
+        if not self.tenant_access_token:
+            self._get_tenant_access_token()
+        if not self.tenant_access_token:
+            logger.error("No valid tenant_access_token, abort batch update.")
+            return 0
+
+        url = (f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}"
+               f"/tables/{table_id}/records/batch_update")
+        headers = {
+            "Authorization": f"Bearer {self.tenant_access_token}",
+            "Content-Type": "application/json",
+        }
+        success = 0
+        BATCH = 500
+        for i in range(0, len(updates), BATCH):
+            batch = updates[i: i + BATCH]
+            payload = {"records": [{"record_id": u["record_id"], "fields": u["fields"]}
+                                   for u in batch]}
+            try:
+                resp = requests.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("code") == 0:
+                    success += len(batch)
+                    logger.info(f"批量更新成功 {success}/{len(updates)} 条")
+                else:
+                    logger.error(f"批量更新失败: {data.get('msg')}")
+            except Exception as e:
+                logger.error(f"批量更新异常: {e}")
+
+        return success

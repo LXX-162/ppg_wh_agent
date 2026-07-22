@@ -168,27 +168,32 @@ class AddressNormalizer:
                     exact_matches.append(record)
                     
         if exact_matches:
-            # 如果有多个相同地址的记录，通过收货单位名称在文本池中的匹配度来决定最优收货单位
-            def get_receiver_score(rec):
-                name = rec["receiver"]
-                # 1. 收货单位名称完整出现在文本池中
-                if name in text_pool:
-                    return 100 + len(name)
-                # 2. 特殊同义词处理：如 "武汉库" 对比 "武汉仓库" 或 "Wuhan Warehouse"
-                if name == "武汉库" and ("武汉仓库" in text_pool or "Wuhan Warehouse" in text_pool):
-                    return 95
-                # 3. 字符重合度
-                char_match_count = sum(1 for c in name if c in text_pool_dense)
-                return char_match_count
-
-            best_match = max(exact_matches, key=get_receiver_score)
-            order["receiver"] = best_match["receiver"]
+            # 统计精确匹配到的不同收货单位名称
+            unique_receivers = set(rec["receiver"] for rec in exact_matches)
             
-            if len(exact_matches) > 1:
-                order["address_exact_match"] = "Q"
-            else:
-                order["address_exact_match"] = "Y"
-                
+            # 如果有多个不同收货单位 → 多关系对应
+            if len(unique_receivers) > 1:
+                # 通过收货单位名称在文本池中的匹配度来决定最优收货单位
+                def get_receiver_score(rec):
+                    name = rec["receiver"]
+                    # 1. 收货单位名称完整出现在文本池中
+                    if name in text_pool:
+                        return 100 + len(name)
+                    # 2. 特殊同义词处理：如 "武汉库" 对比 "武汉仓库" 或 "Wuhan Warehouse"
+                    if name == "武汉库" and ("武汉仓库" in text_pool or "Wuhan Warehouse" in text_pool):
+                        return 95
+                    # 3. 字符重合度
+                    char_match_count = sum(1 for c in name if c in text_pool_dense)
+                    return char_match_count
+
+                best_match = max(exact_matches, key=get_receiver_score)
+                order["receiver"] = best_match["receiver"]
+                order["address_exact_match"] = "多关系对应"
+                return order
+            
+            # 只有一个收货单位或所有匹配记录都是同一收货单位 → 一致
+            order["receiver"] = exact_matches[0]["receiver"]
+            order["address_exact_match"] = "一致"
             return order
             
         # 2. 如果没有一模一样的地址，再利用文本池进行模糊匹配
@@ -222,7 +227,7 @@ class AddressNormalizer:
             # 优先选择地址最长的（包含特征信息最多，越长越精确）
             best_match = max(matched_records, key=lambda x: len(x["address"]))
             order["receiver"] = best_match["receiver"]
-            order["address_exact_match"] = "N"
+            order["address_exact_match"] = "模糊匹配"
         else:
             # 兜底：即使没有任何记录通过模糊匹配，也从全库中挑出得分最高的一条
             # 按收货单位名称与文本池的字符重合度评分
@@ -240,7 +245,7 @@ class AddressNormalizer:
                 order["receiver"] = best_fallback["receiver"]
             else:
                 order["receiver"] = ""
-            order["address_exact_match"] = "N"
+            order["address_exact_match"] = "模糊匹配"
             
         return order
 
@@ -277,9 +282,26 @@ class AddressNormalizer:
                         city = county
                         
                 if province:
-                    order["到货省份"] = province
+                    # 去掉省份后缀（省/市/自治区等），只保留地点名称
+                    province_clean = province
+                    for suffix in ["维吾尔自治区", "壮族自治区", "回族自治区", "自治区", "省", "市"]:
+                        if province_clean.endswith(suffix):
+                            province_clean = province_clean[:-len(suffix)]
+                            break
+                    order["到货省份"] = province_clean
                 if city:
-                    order["到货城市"] = city
+                    # 去掉城市后缀（市/地区/自治州/盟/县），只保留地点名称
+                    city_clean = city
+                    for suffix in ["自治州", "地区", "市", "盟", "县"]:
+                        if city_clean.endswith(suffix):
+                            city_clean = city_clean[:-len(suffix)]
+                            break
+                    order["到货城市"] = city_clean
+                    
+                # 针对直辖市（如北京、上海、天津、重庆）：省份和城市都设为去掉"市"后的名称
+                if province_clean in ["北京", "上海", "天津", "重庆"]:
+                    order["到货省份"] = province_clean
+                    order["到货城市"] = city_clean if city_clean != province else province_clean
             except Exception:
                 pass
                 

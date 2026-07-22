@@ -10,6 +10,9 @@ class RequirementNormalizer:
         if not requirement:
             return order
             
+        # 0. 去除 PDF 提取残留的控制字符标记（如 (cid:9) 等）
+        requirement = re.sub(r'\(cid:\d+\)', '', requirement)
+
         # 剔除因为排版穿插进来的已知英文表头和其它表格字段
         noise_patterns = [
             r'Customer Receive',
@@ -40,3 +43,4 @@ class RequirementNormalizer:
             order["requirement"] = cleaned
             
         return order
+

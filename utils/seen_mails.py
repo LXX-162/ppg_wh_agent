@@ -8,10 +8,7 @@ class SeenMailsManager:
     """
     管理已处理过的邮件 UID，防止重复处理。
     持久化到 output/cache/seen_mails.json。
-    格式：
-    {
-        "seen_uids": ["12345", "12346", ...]
-    }
+    格式：{ "seen_uids": ["12345", "12346", ...] } 保持添加顺序
     """
     CACHE_FILE = os.path.join("output", "cache", "seen_mails.json")
 
@@ -30,10 +27,12 @@ class SeenMailsManager:
 
     @classmethod
     def save(cls, seen_uids: set):
-        """保存已读邮件 UID 集合。"""
+        """保存已读邮件 UID 集合（按数字升序排列）。"""
         os.makedirs(os.path.dirname(cls.CACHE_FILE), exist_ok=True)
         try:
-            data = {"seen_uids": sorted(seen_uids)}
+            # 转 int 排序再转回 str，保证数字顺序
+            sorted_list = sorted(seen_uids, key=lambda x: int(x))
+            data = {"seen_uids": sorted_list}
             with open(cls.CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
             logger.debug(f"已保存 {len(seen_uids)} 条已读记录至 {cls.CACHE_FILE}")

@@ -227,6 +227,159 @@ class ContentParser:
             return ""
 
     @staticmethod
+    def extract_company_name(text: str) -> str:
+        """
+        从 PDF 文本中提取客户公司名。
+        位置：在"客户"字段的 ~ 之后。
+
+        已知结构模式：
+          A) 公司名完整在 ~ 到 Frt bill 之间（主流情况）
+          B) 公司名被 Frt bill 截断，后半段藏在 "电话：...  订单号:" 行中
+          C) ~ 后出现两家公司（如 东莞市浚哲 和 宁波四维尔），取最后一家
+          D) ~ 后直接是 PPG 自家公司（兜底，原样返回）
+
+        全局策略：
+          1. 扩展搜索范围到"电话："行，从中抢救被截断的公司名后半段
+          2. 去除 PPG 噪声行；混合行保留非 PPG 部分
+          3. 当有多个候选段时取最后一段（最靠近地址的那个）
+          4. 若仍无结果，回退取原始 PPG 公司名
+        """
+        idx = text.find('~')
+        if idx == -1:
+            return ""
+
+        _PPG_CORE = re.compile(r'庞贝捷涂料|PPG\s*涂料|PPG\s+Coatings?', re.IGNORECASE)
+        _DATE_NOISE = re.compile(
+            r'(实际|计划)发货|July|August|January|February|March|April|May|June|'
+            r'September|October|November|December', re.IGNORECASE
+        )
+        # 地址起始：2~8个汉字后跟省市关键词
+        _ADDR_START = re.compile(
+            r'[\u4e00-\u9fa5]{2,8}(?:省|市|自治区|自治州|开发区|新区|高新区|实验区|县)'
+        )
+
+        # ── 第一段：~ 到 Frt bill ────────────────────────────────────
+        chunk_pre = text[idx + 1:]
+        frt_pos = chunk_pre.find('Frt bill')
+        if frt_pos != -1:
+            chunk_pre = chunk_pre[:frt_pos]
+
+        # ── 第二段：Frt bill 后的"电话："行（抢救截断的公司名后半段） ──
+        # 结构："电话：...  [公司名后半段]  订单号: XXXX"
+        rescued_suffix = ""
+        frt_abs = text.find('Frt bill', idx)
+        if frt_abs != -1:
+            tel_pos = text.find('电话：', frt_abs)
+            if tel_pos != -1:
+                tel_line_end = text.find('\n', tel_pos)
+                tel_line = text[tel_pos: tel_line_end if tel_line_end != -1 else tel_pos + 200]
+                # 去掉"电话：86..."部分，留下中间的中文内容
+                tel_line = re.sub(r'电话：[\d\s\-]+', '', tel_line)
+                # 去掉"订单号: XXXX"及之后
+                tel_line = re.sub(r'订单号\s*[:：]\s*\S+.*', '', tel_line).strip()
+                # 如果剩余内容不是地址，可能是公司名后半段
+                if tel_line and not _ADDR_START.search(tel_line[:6]):
+                    rescued_suffix = tel_line.strip()
+
+        # ── 处理 ~ 到 Frt bill 之间的行 ─────────────────────────────
+        lines = [ln.strip() for ln in chunk_pre.splitlines()]
+        fragments = []  # 每个元素代表一个独立的公司名候选片段
+
+        for ln in lines:
+            if not ln:
+                continue
+            # 去掉日期噪声
+            date_m = _DATE_NOISE.search(ln)
+            if date_m:
+                ln = ln[:date_m.start()].strip()
+            if not ln:
+                continue
+
+            if _PPG_CORE.search(ln):
+                # 混合行：去掉 PPG 部分，保留剩余
+                clean = _PPG_CORE.sub('', ln)
+                clean = re.sub(r'（[^）]{1,6}）有限公司', '', clean)
+                clean = re.sub(r'（[^）]{1,6}）', '', clean)
+                clean = re.sub(r'^有限公司\s*', '', clean).strip()
+                if len(clean.replace(' ', '')) >= 3:
+                    fragments.append(clean)
+                # 纯 PPG 行或清理后太短：丢弃，作为分隔符（代表一个新候选的开始）
+                else:
+                    # 用 None 作为分隔标记
+                    fragments.append(None)
+                continue
+
+            # 截断到地址起始处
+            addr_m = _ADDR_START.search(ln)
+            if addr_m:
+                ln = ln[:addr_m.start()].strip()
+            if ln:
+                fragments.append(ln)
+
+        # ── 拼接：按 rescued_suffix 的完整性决定策略 ────────────────
+
+        # 将 fragments 按 None 分割成独立候选段（None 是不同公司间的分隔符）
+        segments = []
+        current = []
+        for f in fragments:
+            if f is None:
+                if current:
+                    segments.append("".join(current))
+                current = []
+            else:
+                current.append(f)
+        if current:
+            segments.append("".join(current))
+
+        _COMPLETE_MARKERS = re.compile(r'有限公司|股份公司|月结库|集团有限|仓储有限')
+
+        # rescued_suffix 是一个完整公司名（Case B：多家公司，取最后一家）
+        rescued_is_complete = (
+            bool(rescued_suffix)
+            and len(rescued_suffix) >= 8
+            and _COMPLETE_MARKERS.search(rescued_suffix)
+        )
+
+        if rescued_is_complete:
+            # 电话行抢救出的是完整的客户公司名，直接使用
+            company_name = rescued_suffix
+
+        elif rescued_suffix:
+            # rescued_suffix 是短尾巴（如"限公司月结库"），需要拼到前段末尾
+            last_seg = segments[-1].strip() if segments else ""
+            company_name = last_seg + rescued_suffix
+
+        else:
+            # 没有 rescued_suffix：PPG 行只是噪声，把所有片段拼起来
+            # (处理公司名被 PPG 行打断跨行的情况)
+            company_name = "".join(f for f in fragments if f is not None)
+
+        # ── 截断到地址起始处 ──────────────────────────────────────
+        addr_m = _ADDR_START.search(company_name)
+        if addr_m:
+            company_name = company_name[:addr_m.start()].strip()
+
+        # ── 兜底：若仍为空，取 ~ 后原始第一行（PPG 自家公司名）────────
+        if not company_name:
+            for ln in lines:
+                if not ln:
+                    continue
+                date_m = _DATE_NOISE.search(ln)
+                if date_m:
+                    ln = ln[:date_m.start()].strip()
+                if ln:
+                    addr_m = _ADDR_START.search(ln)
+                    if addr_m:
+                        ln = ln[:addr_m.start()].strip()
+                    if ln:
+                        logger.info(f"提取 [公司名] -> 成功(PPG兜底): {ln}")
+                        return ln
+            return ""
+
+        logger.info(f"提取 [公司名] -> 成功: {bool(company_name)} | 内容: {company_name}")
+        return company_name
+
+    @staticmethod
     def extract_contact(text: str) -> str:
         result = ContentParser.extract_block(text, ["客户联系人", "联系人"], ["PPG联系人", "运输公司", "承运商", "发货单号", "电话"])
         if not result:
@@ -246,26 +399,52 @@ class ContentParser:
             result_fallback = ContentParser.extract_block(text, ["客户:", "客户："], ["运输公司", "Carrier", "发货单号", "客户联系人"])
             if result_fallback:
                 lines = [line.strip() for line in result_fallback.splitlines() if line.strip()]
-                
-                # 寻找起步界限 (Frt bill 或 电话 或 SBU)
-                start_idx = 0
+
+                _CITY_LINE = re.compile(
+                    r'[\u4e00-\u9fa5a-zA-Z\s]+,\s*[\u4e00-\u9fa5a-zA-Z\s]+,\s*\d{4,6},\s*CN'
+                )
+
+                # 找到 Frt bill/SBU 行作为地址区域的起始锚点
+                frt_idx = -1
                 for i, line in enumerate(lines):
-                    if "Frt bill" in line or "SBU:" in line or "电话" in line:
-                        start_idx = i
+                    if re.search(r'Frt bill|SBU:', line):
+                        frt_idx = i
                         break
-                        
-                # 收集起步界限之后直到倒数第二行的所有行 (倒数第一行通常是 城市, 省份, 邮编)
-                if len(lines) > 1:
-                    address_lines = lines[start_idx:-1]
+
+                # 地址区域：从 Frt bill 行开始（含）到末尾
+                # （Frt bill 行及紧跟的电话/传真行可能包含嵌入的地址信息，
+                #  通过后续正则清理去掉噪声文字而保留地址部分）
+                addr_start = frt_idx if frt_idx != -1 else 0
+
+                # 末尾截止：从末尾向前扫描，找到最后一个含城市行特征的行并排除其后内容
+                # （有时城市行不是最后一行，如后面有乱码的承运商行）
+                addr_end = len(lines)
+                for _j in range(len(lines) - 1, addr_start - 1, -1):
+                    if _CITY_LINE.search(lines[_j]):
+                        addr_end = _j
+                        break
+
+                address_lines = lines[addr_start:addr_end]
+                if address_lines:
                     result = " ".join(address_lines)
+                elif len(lines) > 1:
+                    result = " ".join(lines[:-1])
                 else:
                     result = result_fallback
-                    
-                # 进一步清理带入的噪声
-                result = re.sub(r'(?:电话|传真|Frt bill|SBU)[:：]\s*[\d\-\sA-Za-z]+', ' ', result)
+
+                # 正则清理：去掉噪声文字，但保留行内的地址内容
+                # 1. 先整体清理 "Frt bill: SBU: XXXX" 整个复合串
+                result = re.sub(r'Frt bill\s*[:：]\s*SBU\s*[:：]\s*[A-Za-z0-9]+', ' ', result)
+                # 2. 再分别清理剩余的 SBU/电话/传真
+                result = re.sub(r'(?:电话|传真|SBU)[:：]\s*[\d\-\sA-Za-z]+', ' ', result)
                 result = re.sub(r'Waybill:?', ' ', result, flags=re.IGNORECASE)
                 result = re.sub(r'订单号[:：]\s*[A-Za-z0-9]+', ' ', result)
                 result = re.sub(r'月结库|月结仓', ' ', result)
+                # 先压缩空格，再清理遗留的孤立冒号和公司名残片（确保 ^ 锚点能正确匹配）
+                result = re.sub(r'\s+', ' ', result).strip()
+                result = re.sub(r'^[:：]\s*', '', result)
+                # 清理公司名残片（如独立的"有限公司"等出现在地址开头的噪声，前缀最多15汉字）
+                result = re.sub(r'^[\u4e00-\u9fa5]{0,15}有限公司[\u4e00-\u9fa5]{0,4}\s*', '', result)
 
                 result = re.sub(r'\s+', ' ', result).strip()
                 
@@ -295,6 +474,7 @@ class ContentParser:
         requirement = ContentParser.extract_requirement(norm_text)
         weight = ContentParser.extract_weight(norm_text)
         quantity = ContentParser.extract_quantity(norm_text)
+        company_name = ContentParser.extract_company_name(norm_text)
         
         logger.info("=== PDF 字段解析完成 ===")
         
@@ -305,5 +485,7 @@ class ContentParser:
             "contact": contact,
             "requirement": requirement,
             "weight": weight,
-            "quantity": quantity
+            "quantity": quantity,
+            "company_name": company_name,
         }
+
