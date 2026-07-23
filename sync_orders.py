@@ -66,18 +66,27 @@ def parse_order_date(order: dict):
 
 def order_to_feishu_record(order: dict) -> dict:
     """将订单字段映射为飞书多维表字段格式。"""
-    # 重量
-    weight_raw = order.get("weight", "0")
-    try:
-        weight = float(str(weight_raw).replace("KG", "").replace("kg", "").strip())
-    except ValueError:
-        weight = 0.0
 
-    # 数量
+
+
+
+
+        # 重量：去掉 KG 后缀，转为数字（保留原文格式，供飞书数字字段使用）
+    weight_raw = order.get("weight", "0")
+    weight_str = str(weight_raw).replace("KG", "").replace("kg", "").strip()
+    if not weight_str:
+        weight_str = "0"
     try:
-        quantity = int(order.get("quantity", 0))
+        weight_num = float(weight_str)
     except (ValueError, TypeError):
-        quantity = 0
+        weight_num = 0.0
+
+    # 数量：可能有小数（如 0.294），用 float 保留
+    quantity_raw = order.get("quantity", "0")
+    try:
+        quantity = float(str(quantity_raw).strip())
+    except (ValueError, TypeError):
+        quantity = 0.0
 
     # 下单日期 → Unix 毫秒时间戳（飞书日期字段格式）
     order_date_ts = None
@@ -101,8 +110,8 @@ def order_to_feishu_record(order: dict) -> dict:
         "收货地址": order.get("address", ""),
         "收货人":   order.get("contact", ""),
         "客户要求": order.get("requirement", ""),
-        "数量":     quantity,
-        "重量":     weight,
+                "数量":     quantity,
+        "重量":     weight_num,
         "发运方式": order.get("发运方式", ""),
         "始发城市": ORIGIN_CITY,
         "到货城市": order.get("到货城市", ""),
@@ -123,6 +132,23 @@ def sync():
         return
 
     # ── 2. 按业务日期过滤 ────────────────────────────────────────────
+    # to_write  = []
+    # to_defer  = []
+    # anomalies = []
+
+    # for order in all_pending:
+    #     biz_date = parse_order_date(order)
+    #     if biz_date is None:
+    #         anomalies.append(order)
+    #     elif biz_date == today:
+    #         to_write.append(order)
+    #     elif biz_date > today:
+    #         to_defer.append(order)
+    #     else:
+    #         anomalies.append(order)
+
+    # ── 2. 按业务日期过滤 ────────────────────────────────────────────
+    # 临时修改：忽略日期限制，全部写入
     to_write  = []
     to_defer  = []
     anomalies = []
@@ -130,13 +156,9 @@ def sync():
     for order in all_pending:
         biz_date = parse_order_date(order)
         if biz_date is None:
-            anomalies.append(order)
-        elif biz_date == today:
-            to_write.append(order)
-        elif biz_date > today:
-            to_defer.append(order)
+            anomalies.append(order)  # 日期解析失败的仍标记为异常
         else:
-            anomalies.append(order)
+            to_write.append(order)   # ← 所有有日期（无论哪天）的订单都写入
 
     if anomalies:
         anomaly_nos = [o.get("order_no") for o in anomalies]
@@ -167,8 +189,8 @@ def sync():
             "收货地址":   o.get("address", ""),
             "收货单位":   o.get("receiver", ""),
             "收货人":     o.get("contact", ""),
-            "重量":       o.get("weight", ""),
-            "数量":       o.get("quantity", ""),
+                        "重量":       order_to_feishu_record(o).get("重量", ""),
+            "数量":       order_to_feishu_record(o).get("数量", ""),
             "发运方式":   o.get("发运方式", ""),
             "危险品类别": o.get("危险品类别", ""),
             "客户要求":   o.get("requirement", ""),
@@ -207,4 +229,5 @@ def sync():
 
 
 if __name__ == "__main__":
+    sync()
     sync()

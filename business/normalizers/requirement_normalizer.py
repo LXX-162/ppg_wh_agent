@@ -12,6 +12,8 @@ class RequirementNormalizer:
             
         # 0. 去除 PDF 提取残留的控制字符标记（如 (cid:9) 等）
         requirement = re.sub(r'\(cid:\d+\)', '', requirement)
+        # 去除 customer requirement 中的订单号（11开头的8位数字）
+        requirement = re.sub(r'11\d{6,8}', '', requirement)
 
         # 剔除因为排版穿插进来的已知英文表头和其它表格字段
         noise_patterns = [

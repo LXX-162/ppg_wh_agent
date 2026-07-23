@@ -204,24 +204,34 @@ class ContentParser:
         result = match.group(2) if match else ""
         logger.info(f"提取 [日期] -> 成功: {bool(result)} | 内容: {result}")
         return result
-        
+
     @staticmethod
     def extract_weight(text: str) -> str:
-        match = re.search(r'总毛重[:：\s]*([\d\.]+K?G?)', text, re.IGNORECASE)
+        match = re.search(r'总毛重[:：\s]*([\d\.]+)', text, re.IGNORECASE)
         result = match.group(1) if match else ""
+        if result:
+            # 去掉小数部分尾部多余的 0（保留原始精度，如 1358.070 -> 1358.07, 1185.000 -> 1185）
+            if '.' in result:
+                
+                result = result.rstrip('0').rstrip('.') if result.rstrip('0').rstrip('.') else '0'
         logger.info(f"提取 [重量] -> 成功: {bool(result)} | 内容: {result}")
         return result
 
     @staticmethod
     def extract_quantity(text: str) -> str:
-        matches = re.findall(r'Qty\s*\(数量\)[:：\s]*(\d+)', text)
+        matches = re.findall(r'Qty\s*\(数量\)[:：\s]*([\d\.]+)', text)
         if not matches:
-            matches = re.findall(r'数量[:：\s]*(\d+)', text)
+            matches = re.findall(r'数量[:：\s]*([\d\.]+)', text)
             
         if matches:
-            total = sum(int(m) for m in matches)
-            logger.info(f"提取 [数量] -> 成功: True | 累加结果: {total}")
-            return str(total)
+            total = sum(float(m) for m in matches)
+            # 如果小数部分为 0，输出整数形式
+            if total == int(total):
+                logger.info(f"提取 [数量] -> 成功: True | 累加结果: {int(total)}")
+                return str(int(total))
+            else:
+                logger.info(f"提取 [数量] -> 成功: True | 累加结果: {total}")
+                return str(total)
         else:
             logger.info("提取 [数量] -> 成功: False | 内容: ")
             return ""
@@ -380,6 +390,70 @@ class ContentParser:
         return company_name
 
     @staticmethod
+    def extract_danger_from_pdf(text: str) -> str:
+        """
+        从 PDF 文本中提取危险品类别。
+        匹配两种格式：
+
+        格式A（逐行，旧版）：
+            UN 1263
+            3           <- 这个数字是 DG 类别
+            PG III
+
+        格式B（标准发货单，一行内）：
+            UN 1263 Illusion Met. YF-SGM444M/17K-C1 ...
+            3 P G III > CNT(桶) ...
+
+        如果中间部分是 "NONE" / "None" -> NDG
+        如果中间部分是数字（如 3, 4.1, 8 等）-> DG
+        返回 "DG" 或 "NDG" 或 ""
+        """
+        # 格式A：严格逐行
+        pattern_a = re.compile(
+            r'UN\s+(?:\d+|None)\s*' '\n'
+            r'(\d+(?:\.\d+)?|[Nn][Oo][Nn][Ee])\s*' '\n'
+            r'PG\s+\w+',
+            re.MULTILINE
+        )
+        match = pattern_a.search(text)
+        if match:
+            mid = match.group(1).strip().upper()
+            if mid == "NONE":
+                return "NDG"
+            try:
+                float(mid)
+                return "DG"
+            except ValueError:
+                pass
+
+        # 格式B：UN 数字 ... (中间跨行内容) ... 数字 P\s*G III/II/I
+        pattern_b = re.compile(
+            r'UN\s+(None|\d+)\b.*?'
+            r'(None|\d+(?:\.\d+)?)\s+P\s*G\s+[IVXL]+',
+            re.DOTALL | re.IGNORECASE
+        )
+        match_b = pattern_b.search(text)
+        if match_b:
+            cls_val = match_b.group(2).upper()
+            if cls_val == "NONE":
+                return "NDG"
+            try:
+                float(cls_val)
+                return "DG"
+            except ValueError:
+                pass
+
+        # 兜底：如果完全没匹配到上述格式但存在 UN None，认为是 NDG
+        if re.search(r'UN\s+(?:\d+|None)[\s\S]{0,50}DG', text, re.IGNORECASE):
+            return "DG"
+        un_block = re.search(r'UN\s+(?:\d+|None)[\s\S]{0,100}PG?\s*\w+', text, re.IGNORECASE)
+        if un_block:
+            block = un_block.group(0)
+            if 'NONE' in block.upper():
+                return "NDG"
+        return ""
+
+    @staticmethod
     def extract_contact(text: str) -> str:
         result = ContentParser.extract_block(text, ["客户联系人", "联系人"], ["PPG联系人", "运输公司", "承运商", "发货单号", "电话"])
         if not result:
@@ -475,7 +549,8 @@ class ContentParser:
         weight = ContentParser.extract_weight(norm_text)
         quantity = ContentParser.extract_quantity(norm_text)
         company_name = ContentParser.extract_company_name(norm_text)
-        
+        pdf_danger = ContentParser.extract_danger_from_pdf(norm_text)
+
         logger.info("=== PDF 字段解析完成 ===")
         
         return {
@@ -487,5 +562,6 @@ class ContentParser:
             "weight": weight,
             "quantity": quantity,
             "company_name": company_name,
+            "pdf_danger": pdf_danger,
         }
 

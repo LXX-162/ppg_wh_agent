@@ -33,7 +33,14 @@ class MailReader:
         if not self.mail:
             self.connect()
 
-        self.mail.select("INBOX")
+        try:
+            self.mail.select("INBOX")
+        except Exception:
+            # 连接已断开，重新连接
+            self.disconnect()
+            self.connect()
+            self.mail.select("INBOX")
+
         status, response = self.mail.uid("SEARCH", None, search_criteria)
         if status != "OK":
             logger.error(f"检索邮件失败: {search_criteria}")
