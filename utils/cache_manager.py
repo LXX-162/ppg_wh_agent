@@ -180,7 +180,7 @@ class PendingOrdersManager:
         - 若 order_no 不存在：新增，状态 pending
         - 若已存在且状态为 synced，但内容有变化：重置为 pending（内容更新）
         - 若已存在且状态为 pending：直接覆盖
-        - 若已存在且状态为 anomaly：保持 anomaly 不变
+        - 若已存在且状态为 anomaly 或 已取消 或 已更新：保持不变
         """
         pending = cls.load_pending()
         changed = 0
@@ -193,14 +193,19 @@ class PendingOrdersManager:
             existing = pending.get(order_no)
             new_entry = dict(order)
 
+            # 检查是否调用方已指定状态（如"拆单"）
+            caller_status = new_entry.get("sync_status", "").strip()
+            is_caller_status_specified = caller_status in ("拆单", "已取消", "已更新")
+
             if existing is None:
                 # 全新订单
-                new_entry["sync_status"] = "pending"
+                if not is_caller_status_specified:
+                    new_entry["sync_status"] = "pending"
                 new_entry["synced_at"] = None
                 pending[order_no] = new_entry
                 changed += 1
-            elif existing.get("sync_status") == "anomaly":
-                # 异常订单保持不变
+            elif existing.get("sync_status") in ("anomaly", "已取消", "已更新"):
+                # 异常/已取消/已更新 的订单保持不变
                 pass
             elif existing.get("sync_status") == "synced":
                 # 检查内容是否有变化（比较除状态字段外的核心字段）
@@ -208,14 +213,16 @@ class PendingOrdersManager:
                 old_core = {k: v for k, v in existing.items() if k not in _IGNORE}
                 new_core = {k: v for k, v in new_entry.items() if k not in _IGNORE}
                 if old_core != new_core:
-                    new_entry["sync_status"] = "pending"
+                    if not is_caller_status_specified:
+                        new_entry["sync_status"] = "pending"
                     new_entry["synced_at"] = None
                     pending[order_no] = new_entry
                     changed += 1
                     logger.info(f"[{order_no}] 内容有变化，重置为 pending")
             else:
-                # pending 状态：直接覆盖
-                new_entry["sync_status"] = "pending"
+                # pending/其他状态：直接覆盖
+                if not is_caller_status_specified:
+                    new_entry["sync_status"] = "pending"
                 new_entry["synced_at"] = None
                 pending[order_no] = new_entry
                 changed += 1

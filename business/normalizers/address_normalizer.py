@@ -23,6 +23,21 @@ class AddressNormalizer:
             order["address"] = special_addrs[order_no]
             return order
 
+        # 0a. 保温产品特殊规则：当 requirement 中出现"保温"时，requirement 中的"保温产品送到常熟市"等内容
+        #     只是保温品存储仓库，不是该单的实际收货地址。应使用 content_parser 从电话行提取的昆山地址，
+        #     而非 requirement 中提到的常熟地址。
+        req_lower = requirement.replace(" ", "").lower()
+        has_baowen = "保温" in req_lower
+        has_changshu = "常熟" in req_lower
+        phone_addr_has_features = bool(re.search(r'[路街道号村]', address))
+        if has_baowen and has_changshu and phone_addr_has_features:
+            # 保留 content_parser 提取的地址，不从 requirement 覆盖
+            # 清空 requirement 使其不被下游的 addr_pattern 匹配到
+            requirement = ""
+            requirement_was_cleared = True
+        else:
+            requirement_was_cleared = False
+
         # 0b. 针对武汉恒基达鑫 / 化工五路的特殊处理
         req_clean = requirement.replace(" ", "")
         addr_clean = address.replace(" ", "")
@@ -33,7 +48,8 @@ class AddressNormalizer:
         # 提取标准中文地址的精准正则：必须以 省/市/区 开启，并使用贪婪匹配到最后一个结尾词
         # 优化：1. 省/市名前缀不允许含有公司、有限等词，防止将公司名部分错误匹配为地址前部。
         #       2. 增加了口、楼、门、栋、座、室等结尾词，确保"交叉口"、"1号楼"、"5号门"等行尾细节信息能够被完整匹配。
-        addr_pattern = r'((?:(?![公司有限集团厂仓库物流股份])[\u4e00-\u9fa5]){2,10}(?:省|市|自治区|自治州|实验区|开发区|新区|高新区|县|区)[\u4e00-\u9fa5A-Za-z0-9_ \-（）\(\)、「」、，\?？\ufffd\u2014\u2013\.#]+(?:[）\)]|号|公司|集团|厂|仓库|基地|中心|车间|工业园|园区|区|东|南|西|北|侧|路|街|道|弄|口|楼|门|栋|座|室|房|虎|米|实业)[）\)]?(?:[\u4e00-\u9fa5A-Za-z0-9\-]{0,15})?)'
+
+        addr_pattern = r'((?:(?![公司有限集团厂仓库物流股份])[\u4e00-\u9fa5]){2,10}(?:省|市|自治区|自治州|实验区|开发区|新区|高新区|县|区)[\u4e00-\u9fa5A-Za-z0-9_ \-（）\(\)、「」、，\?？\ufffd\u2014\u2013\.#０-９]+(?:[）\)]|号|公司|集团|厂|仓库|基地|中心|车间|工业园|园区|区|东|南|西|北|侧|路|街|道|弄|口|楼|门|栋|座|室|房|虎|米|实业)[）\)]?(?:[\u4e00-\u9fa5A-Za-z0-9\-]{0,15})?)'
 
         # 清理 requirement 中的订单号和批准人信息
         requirement = re.sub(r'11\d{6,8}', ' ', requirement)
@@ -62,6 +78,8 @@ class AddressNormalizer:
                     '', order["address"]).strip()
                 # 去掉地址末尾跟的英文/数字杂音（如 "ALD096100-FVW(CC)"），但保留中文地址主体
                 order["address"] = re.sub(r'[A-Za-z0-9\-]+[（\(][^）\)]+[）\)][A-Za-z0-9\-]*\s*$', '', order["address"])
+                if requirement_was_cleared:
+                    pass  # address already correct
                 return order
 
             # 兜底：如果标准地址模式匹配失败，尝试从 requirement 中的 "交易地址：" 提取

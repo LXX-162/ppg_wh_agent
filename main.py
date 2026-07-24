@@ -240,10 +240,13 @@ def main():
                         if pdf_order_no in shipping_cache:
                             sc = shipping_cache[pdf_order_no]
                             normalized.setdefault("发运方式", sc.get("shipping", ""))
-                            normalized.setdefault("危险品类别", sc.get("danger", ""))
+                            if not normalized.get("危险品类别"):
+                                normalized["危险品类别"] = sc.get("danger", "")
+                        # PDF 原文解析结果覆盖（优先级最高）
                         pdf_danger = parsed.get("pdf_danger", "")
                         if pdf_danger:
-                            normalized.setdefault("危险品类别", pdf_danger)
+                            if not normalized.get("危险品类别"):
+                                normalized["危险品类别"] = pdf_danger
                         update_instructions[pdf_order_no] = normalized
                         logger.info(f"  → 更新订单 {pdf_order_no}（来自 PDF）")
 
@@ -267,10 +270,12 @@ def main():
                         if pdf_order_no in shipping_cache:
                             sc = shipping_cache[pdf_order_no]
                             normalized.setdefault("发运方式", sc.get("shipping", ""))
-                            normalized.setdefault("危险品类别", sc.get("danger", ""))
+                            if not normalized.get("危险品类别"):
+                                normalized["危险品类别"] = sc.get("danger", "")
                         pdf_danger = parsed.get("pdf_danger", "")
                         if pdf_danger:
-                            normalized.setdefault("危险品类别", pdf_danger)
+                            if not normalized.get("危险品类别"):
+                                normalized["危险品类别"] = pdf_danger
                         parsed_list.append((pdf_order_no, normalized, filename))
 
                     if len(parsed_list) >= 2:
@@ -307,7 +312,7 @@ def main():
         if update_instructions:
             update_list = []
             for on, data in update_instructions.items():
-                data["sync_status"] = "pending"
+                data["sync_status"] = "已更新"
                 data["synced_at"] = None
                 update_list.append(data)
             PendingOrdersManager.add_orders(update_list)
@@ -315,13 +320,20 @@ def main():
 
         # ── 执行拆单新增指令 ──────────────────────────────────────
         if split_new_orders:
+            # 将原单和新单的 sync_status 都设为"拆单"
+            # 原单在 update_instructions 中
+            for on in split_new_orders:
+                if on in update_instructions:
+                    update_instructions[on]["sync_status"] = "拆单"
+                    update_instructions[on]["synced_at"] = None
+            # 新单
             split_list = []
             for on, data in split_new_orders.items():
-                data["sync_status"] = "pending"
+                data["sync_status"] = "拆单"
                 data["synced_at"] = None
                 split_list.append(data)
             PendingOrdersManager.add_orders(split_list)
-            logger.info(f"[拆单] 共新增 {len(split_new_orders)} 条子订单")
+            logger.info(f"[拆单] 共新增 {len(split_new_orders)} 条子订单（状态=拆单）")
 
         # ── 5. 第二遍：解析 PDF_ORDER，跳过已处理邮件 ────────────────
         new_orders_dict = {}
@@ -350,8 +362,8 @@ def main():
                 if order_no in shipping_cache:
                     sc = shipping_cache[order_no]
                     normalized.setdefault("发运方式", sc.get("shipping", ""))
-                    normalized.setdefault("危险品类别", sc.get("danger", ""))
-
+                    if not normalized.get("危险品类别"):
+                        normalized["危险品类别"] = sc.get("danger", "")
                 # 如果 shipping 缓存中没有危险品类别，从 PDF 中提取
                 if not normalized.get("危险品类别"):
                     pdf_danger = parsed.get("pdf_danger", "")

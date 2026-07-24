@@ -48,3 +48,4 @@ class FieldNormalizer:
         order.pop("raw_address", None)
         
         return order
+

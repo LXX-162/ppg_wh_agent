@@ -443,14 +443,24 @@ class ContentParser:
             except ValueError:
                 pass
 
-        # 兜底：如果完全没匹配到上述格式但存在 UN None，认为是 NDG
-        if re.search(r'UN\s+(?:\d+|None)[\s\S]{0,50}DG', text, re.IGNORECASE):
-            return "DG"
-        un_block = re.search(r'UN\s+(?:\d+|None)[\s\S]{0,100}PG?\s*\w+', text, re.IGNORECASE)
-        if un_block:
-            block = un_block.group(0)
-            if 'NONE' in block.upper():
+        # 兜底1：检测 UN\s+None → PD 文本中标记为无危险品
+        # 特征：UN None 数据行的下一行有 "PSN: PAINT - NOT REGULATED"
+        # 注意：产品编码如 BYPWB1DG02 中的 DG 子串不应被误判为危险品
+        un_none = re.search(r'UN\s+None\b', text, re.IGNORECASE)
+        if un_none:
+            after_un_none = text[un_none.end():un_none.end() + 200]
+            # PSN: PAINT - NOT REGULATED → 明确的无危险品标记
+            if 'NOT REGULATED' in after_un_none.upper():
                 return "NDG"
+
+        # 兜底2：如果有数据行中有明显的 DG 危险品类别
+        # 在 UN 数字 后面，找 数字(类别) + P G III/II/I 模式
+        un_num = re.search(r'UN\s+\d+\b', text)
+        if un_num:
+            after_un = text[un_num.end():un_num.end() + 200]
+            if re.search(r'\b\d+(?:\.\d+)?\s+P\s*G\s+[IVXL]+\b', after_un):
+                return "DG"
+
         return ""
 
     @staticmethod
@@ -466,63 +476,165 @@ class ContentParser:
 
     @staticmethod
     def extract_address(text: str) -> str:
-        # 首选明确的标签，加上冒号防止匹配到页底的"公司地址"
-        result = ContentParser.extract_block(text, ["收货地址:", "收货地址：", "交货至:", "交货至："], ["订单号", "电话", "传真", "客户联系人", "Waybill"])
+        result = ""
+
+        # ── 策略1：从收货地址/交货至标签提取 ─────────────────────
+        result = ContentParser.extract_block(
+            text, ["收货地址:", "收货地址：", "交货至:", "交货至："],
+            ["订单号", "电话", "传真", "客户联系人", "Waybill"]
+        )
+
+        # ── 策略2：从客户：标签提取（截取到Frt bill前 + 电话行） ──
         if not result:
-            # 备用抽取逻辑：从客户向下找，直到运输公司或发货单号或客户联系人
-            result_fallback = ContentParser.extract_block(text, ["客户:", "客户："], ["运输公司", "Carrier", "发货单号", "客户联系人"])
-            if result_fallback:
-                lines = [line.strip() for line in result_fallback.splitlines() if line.strip()]
+            raw_block = ContentParser.extract_block(
+                text, ["客户:", "客户："],
+                ["运输公司", "Carrier", "发货单号", "客户联系人"]
+            )
+            if raw_block:
+                lines = [ln.strip() for ln in raw_block.splitlines() if ln.strip()]
 
-                _CITY_LINE = re.compile(
-                    r'[\u4e00-\u9fa5a-zA-Z\s]+,\s*[\u4e00-\u9fa5a-zA-Z\s]+,\s*\d{4,6},\s*CN'
-                )
-
-                # 找到 Frt bill/SBU 行作为地址区域的起始锚点
-                frt_idx = -1
-                for i, line in enumerate(lines):
-                    if re.search(r'Frt bill|SBU:', line):
-                        frt_idx = i
-                        break
-
-                # 地址区域：从 Frt bill 行开始（含）到末尾
-                # （Frt bill 行及紧跟的电话/传真行可能包含嵌入的地址信息，
-                #  通过后续正则清理去掉噪声文字而保留地址部分）
-                addr_start = frt_idx if frt_idx != -1 else 0
-
-                # 末尾截止：从末尾向前扫描，找到最后一个含城市行特征的行并排除其后内容
-                # （有时城市行不是最后一行，如后面有乱码的承运商行）
+                # 地址区域的结束：取 Frt bill 往后的所有行
+                # （因为地址可能在Frt bill前的公司名行，也可能在Frt bill后的电话/传真行）
                 addr_end = len(lines)
-                for _j in range(len(lines) - 1, addr_start - 1, -1):
-                    if _CITY_LINE.search(lines[_j]):
-                        addr_end = _j
+                for i, line in enumerate(lines):
+                    if re.search(r'客户联系人', line):
+                        addr_end = i
+                        break
+                    if re.search(r'运输公司承运人', line):
+                        addr_end = i
                         break
 
-                address_lines = lines[addr_start:addr_end]
+                address_lines = lines[0:addr_end]
                 if address_lines:
                     result = " ".join(address_lines)
-                elif len(lines) > 1:
-                    result = " ".join(lines[:-1])
-                else:
-                    result = result_fallback
 
-                # 正则清理：去掉噪声文字，但保留行内的地址内容
-                # 1. 先整体清理 "Frt bill: SBU: XXXX" 整个复合串
-                result = re.sub(r'Frt bill\s*[:：]\s*SBU\s*[:：]\s*[A-Za-z0-9]+', ' ', result)
-                # 2. 再分别清理剩余的 SBU/电话/传真
-                result = re.sub(r'(?:电话|传真|SBU)[:：]\s*[\d\-\sA-Za-z]+', ' ', result)
-                result = re.sub(r'Waybill:?', ' ', result, flags=re.IGNORECASE)
-                result = re.sub(r'订单号[:：]\s*[A-Za-z0-9]+', ' ', result)
-                result = re.sub(r'月结库|月结仓', ' ', result)
-                # 先压缩空格，再清理遗留的孤立冒号和公司名残片（确保 ^ 锚点能正确匹配）
-                result = re.sub(r'\s+', ' ', result).strip()
-                result = re.sub(r'^[:：]\s*', '', result)
-                # 清理公司名残片（如独立的"有限公司"等出现在地址开头的噪声，前缀最多15汉字）
-                result = re.sub(r'^[\u4e00-\u9fa5]{0,15}有限公司[\u4e00-\u9fa5]{0,4}\s*', '', result)
+        # ── 清洗 ──
+        if result:
+            r = result
 
-                result = re.sub(r'\s+', ' ', result).strip()
-                
-        logger.info(f"提取 [地址] -> 成功: {bool(result)} | 内容: {result}")
+            # 去英文/日期行
+            r = re.sub(r'^.*?实际发货\s*[:：]\s*[A-Za-z]+\s+\d+,\s*\d{4}\s*', '', r)
+            # 去公司名（先保护全角括号内的公司名，避免被误删）
+            # 如"（宁波中骏森驰汽车零部件有限公司）"应保留
+            protected = {}
+            def _protect(m):
+                k = f'__B{len(protected)}__'
+                protected[k] = m.group(0)
+                return k
+            r = re.sub(r'（[^）]+有限公司[^）]*）', _protect, r)
+            # 去公司名 — 但地址行中的客户公司名（如"嘉兴敏惠XX 10号仓库"）应保留
+            # 保护 "XXX有限公司 数字号仓库" 类型的地址末尾
+            protected_addr_end = {}
+            def _protect_addr(m):
+                k = f'__AD{len(protected_addr_end)}__'
+                protected_addr_end[k] = m.group(0)
+                return k
+            r = re.sub(r'[\u4e00-\u9fa5]{2,40}(?:有限公司|股份公司)\s+\d+号\s*\w+', _protect_addr, r)
+
+            r = re.sub(r'[\u4e00-\u9fa5（）]{2,40}(?:有限公司|股份公司|仓储有限|科技有限|月结库)\s*', '', r)
+            r = re.sub(r'(?:^|\s)有限公司\s*', ' ', r)
+
+            for k, v in protected_addr_end.items():
+                r = r.replace(k, v)
+            for k, v in protected.items():
+                r = r.replace(k, v)
+            # 去标签
+            r = re.sub(r'Frt bill\s*[:：]\s*SBU\s*[:：]\s*[A-Za-z0-9]+', ' ', r)
+            # 电话/传真正则限定匹配到可选空格+数字/连字符/空格结尾，不跨越到后面的英文单词
+            r = re.sub(r'(?:电话|传真|SBU)[:：]\s*[\d\-\s]+(?:\s|$)', ' ', r)
+            r = re.sub(r'Waybill[:：]?\s*', ' ', r, flags=re.IGNORECASE)
+            r = re.sub(r'订单号[:：]\s*[A-Za-z0-9]+', ' ', r)
+            r = re.sub(r'DONGGUAN\s*JUNZHE|SHANGHAI\s*XIANGYUE|PPG\s*COATINGS\s*TIANJIN\s*', ' ', r, flags=re.IGNORECASE)
+            r = re.sub(r'CHANGSHU\s*RESUPPLY\s*WHSE[~]?\s*', ' ', r, flags=re.IGNORECASE)
+            r = re.sub(r'XIAN\s*CHENGDA\s*DG\s*RESUPPLY\s*', ' ', r, flags=re.IGNORECASE)
+            r = re.sub(r'BYD\s*HEFEI\s*CONS\s*WHSE[~]?\s*', ' ', r, flags=re.IGNORECASE)
+            r = re.sub(r'JIAXING\s*YUJIA[~]?\s*', ' ', r, flags=re.IGNORECASE)
+            r = re.sub(r'[A-Z\s.]{3,40}~', ' ', r)
+            # ~ 后跟公司名/仓库名类关键词时删除，但不删除地址（地址不含"有限/股份/仓储/月结"等）
+            r = re.sub(r'~[\u4e00-\u9fa5]{2,30}(?:有限公司|股份公司|仓储|科技|月结|汽车零部件|饰件|实业|电子|材料|包装)', ' ', r)
+            r = re.sub(r'~\s+[\u4e00-\u9fa5]{2,30}(?:有限公司|股份公司|仓储|科技|月结|汽车零部件|饰件|实业|电子|材料|包装)', ' ', r)
+            # 去仓库名残片（如"常熟仓库"、"西安DG RESUPPLY仓库"、"PPG 天津烟台仓库"）
+            r = re.sub(r'(?:^|\s)(?:WHSE~)?[A-Z]*\s*[\u4e00-\u9fa5]{2,10}(?:DG\s*)?RESUPPLY\s*仓库', ' ', r, flags=re.IGNORECASE)
+            r = re.sub(r'(?:^|\s)[\u4e00-\u9fa5]{2,6}仓库\s*', ' ', r)
+            r = re.sub(r'(?:^|\s)PPG\s*[\u4e00-\u9fa5]{2,10}仓库\s*', ' ', r, flags=re.IGNORECASE)
+            # 去PPG 限公司残片
+            r = re.sub(r'(?:^|\s)PPG\s*限公司\s*', ' ', r, flags=re.IGNORECASE)
+            # 去开头/中间独立的PPG（如烟台中的"PPG 山东省..."）
+            r = re.sub(r'(?:^|\s)PPG\s+(?=[\u4e00-\u9fa5])', ' ', r, flags=re.IGNORECASE)
+            # 去运输公司/承运商/批准人/联系人等标签行（包含乱码）
+            r = re.sub(r'运输公司承运人[：:][^。\n]*?(?:客户|PPG|发货|\d)', ' ', r)
+            r = re.sub(r'运\s*Ca\s*输\s*rri\s*公\s*er\s*司承运人[：:][^。\n]*', ' ', r)
+            r = re.sub(r'客\s*P\s*户\s*G\s*联\s*联\s*系\s*系\s*人\s*人[：:][^。\n]*', ' ', r)
+            r = re.sub(r'PPG联系人[：:][^。\n]*', ' ', r)
+            r = re.sub(r'Org/Warehouse[：:][^。\n]*', ' ', r)
+            r = re.sub(r'客户签收[：:][^。\n]*', ' ', r)
+            r = re.sub(r'Customer\s*Receive[^。\n]*', ' ', r, flags=re.IGNORECASE)
+            r = re.sub(r'操作人[：:]\s*\S+', ' ', r)
+            r = re.sub(r'客户[：:]\s*\d+', ' ', r)
+            r = re.sub(r'Cust Po[：:][^。\n]*', ' ', r)
+            # 去城市行/CN行（只匹配到第一个逗号前为2~6个汉字的短城市名）
+            r = re.sub(r'(?:^|\s)[\u4e00-\u9fa5]{2,6},\s*[\u4e00-\u9fa5]{2,6},\s*\d{4,6},\s*CN', ' ', r)
+            # 压缩空格
+            r = re.sub(r'\s+', ' ', r).strip()
+            r = re.sub(r'^[:：\s]+', '', r)
+            # 去非地址文本（送货备注、随货要求等）
+            r = re.sub(r'送货时需携带客户送货单', '', r)
+            r = re.sub(r'随货必带[^，。\n]*', '', r)
+            r = re.sub(r'，批次板', '', r)
+            r = re.sub(r'携带\d+份发货单', '', r)
+            r = re.sub(r'\s*\(随货携带[^)]*\)', '', r)
+            r = re.sub(r'\s*\(随货携带[^）]*\)', '', r)
+            r = re.sub(r'发货需要携带[^，。\n]*', '', r)
+            r = re.sub(r'不需要湿[^，。\n]*', '', r)
+            r = re.sub(r's*\bCV\b[^，。\n]*', '', r, flags=re.IGNORECASE)
+            # 去掉备注类全角括号内容（如"（随货携带COA…）"），但保留机构名括号（如"（宁波中骏森驰…）"）
+            # 规则：括号内若含"随货/携带/标签/Cust Po/订单号"等备注词 → 删除整个括号
+            r = re.sub(r'（[^）]*(?:随货|携带|COA|标签|批次板|保质期|Cust Po|订单号)[^）]*）', '', r)
+            # 去掉半角括号备注（如"(随货携带…)"）
+            r = re.sub(r'\([^)]*(?:随货|携带|COA|标签|批次板|保质期)[^)]*\)', '', r)
+            # 去括号只留内容（括号内是机构名/公司名）
+            r = re.sub(r'（([^）]+(?:有限公司|股份公司|仓储有限|科技有限)[^）]*)）', r'\1', r)
+            r = re.sub(r'\s+', ' ', r).strip()
+            r = re.sub(r'\s+([\u4e00-\u9fa5])$', '', r).strip()
+            r = re.sub(r'，\s*$', '', r).strip()
+            r = re.sub(r'\s*,\s*$', '', r).strip()
+            # 补省前缀：如"宁波慈溪市…"前加"浙江省"
+            r = re.sub(r'^(宁波|湖州|嘉兴|杭州|绍兴)', r'浙江省\1', r)
+
+            result = r
+
+        # ── 策略3：如果策略2没得到有效地址，从传真/电话行提取 ──
+        if not result:
+            fax_pos = text.find('传真：')
+            if fax_pos == -1:
+                fax_pos = text.find('传真:')
+            if fax_pos != -1:
+                after_fax = text[fax_pos:]
+                end_kws = ['批准人', '客户联系人', '运输公司', '承运商']
+                end_pos = len(after_fax)
+                for kw in end_kws:
+                    p = after_fax.find(kw)
+                    if p != -1 and p < end_pos:
+                        end_pos = p
+                fax_block = after_fax[:end_pos].strip()
+
+                fax_clean = re.sub(r'^传真[:：][\d\s\-]+\s*', '', fax_block)
+                fax_clean = re.sub(r'Waybill.*$', '', fax_clean).strip()
+                fax_clean = re.sub(r'[\u4e00-\u9fa5a-zA-Z\s]+,\s*[\u4e00-\u9fa5a-zA-Z\s]+,\s*\d{4,6},\s*CN\s*', '', fax_clean)
+                fax_clean = re.sub(r'\s+', ' ', fax_clean).strip()
+
+                if fax_clean:
+                    # 基本清洗
+                    fax_clean = re.sub(r'[\u4e00-\u9fa5（）]{2,40}(?:有限公司|股份公司|仓储有限)\s*', '', fax_clean)
+                    fax_clean = re.sub(r'\s+', ' ', fax_clean).strip()
+                    # 只要包含地址特征就用
+                    if re.search(r'[省市区县路街道]', fax_clean):
+                        result = fax_clean
+
+        if result:
+            logger.info(f"提取 [地址] -> 成功: True | 内容: {result}")
+        else:
+            logger.info("提取 [地址] -> 成功: False | 内容: ")
         return result
 
     @staticmethod
@@ -530,8 +642,11 @@ class ContentParser:
         result = ContentParser.extract_block(
             text, 
             ["客户要求"], 
-            ["UN No.", "UN None", "Description", "Item Ord.Qty", "Shipped Qty", "总毛重"]
+            ["批准人", "UN No.", "UN None", "Description", "Item Ord.Qty", "Shipped Qty", "总毛重"]
         )
+        if result:
+            # 去掉末尾紧跟的订单号（如 "自提 11973589" → "自提"）
+            result = re.sub(r'\s+11\d{6,}$', '', result).strip()
         logger.info(f"提取 [客户要求] -> 成功: {bool(result)} | 内容: {result}")
         return result
 
