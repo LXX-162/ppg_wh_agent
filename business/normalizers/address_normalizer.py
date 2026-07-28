@@ -57,30 +57,33 @@ class AddressNormalizer:
         # 去掉地址中的联系人姓名+电话（如"俞超 13851587490"）
         requirement = re.sub(r'(?<!\d)[\u4e00-\u9fa5]{2,3}\s*\d{7,11}', '', requirement)
 
-        # 1. 优先从客户要求中提取地址
+        # 1. 优先从客户要求中提取地址（但只当提取结果看起来像地址时采用）
         if requirement:
             req_match = re.search(addr_pattern, requirement)
             if req_match:
-                order["address"] = req_match.group(1).replace('\n', ' ').strip()
+                req_addr = req_match.group(1).replace('\n', ' ').strip()
                 # 剔除中文字符间的空格
-                order["address"] = re.sub(r'(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])', '', order["address"])
-                # 清理 requirement 中提取的地址的前缀杂音（"保温产品送到"、"第二地址发货"等）
-                order["address"] = re.sub(r'保温产品送到\s*', '', order["address"])
-                order["address"] = re.sub(r'第二地址发货\s*', '', order["address"])
-                order["address"] = re.sub(r'\s*货台叫号\d*', '', order["address"])
+                req_addr = re.sub(r'(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])', '', req_addr)
+                # 清理 requirement 中提取的地址的前缀杂音
+                req_addr = re.sub(r'保温产品送到\s*', '', req_addr)
+                req_addr = re.sub(r'第二地址发货\s*', '', req_addr)
+                req_addr = re.sub(r'\s*货台叫号\d*', '', req_addr)
                 # 清理地址末尾的姓名/收货人/电话号码/括号注释
-                order["address"] = re.sub(r'(?<!\d)[\u4e00-\u9fa5]{2,3}\s*\d{7,11}\s*$', '', order["address"])
-                order["address"] = re.sub(r'\d{7,11}\s*$', '', order["address"])
-                order["address"] = re.sub(r'收货人[\u4e00-\u9fa5，,、\sA-Za-z\d()（）\-]+$', '', order["address"])
-                                # 去掉地址末尾括号注释（仅当括号内容包含 requirement 关键词时）
-                order["address"] = re.sub(
+                req_addr = re.sub(r'(?<!\d)[\u4e00-\u9fa5]{2,3}\s*\d{7,11}\s*$', '', req_addr)
+                req_addr = re.sub(r'\d{7,11}\s*$', '', req_addr)
+                req_addr = re.sub(r'收货人[\u4e00-\u9fa5，,、\sA-Za-z\d()（）\-]+$', '', req_addr)
+                req_addr = re.sub(
                     r'\s*[（\(](?:随货|携带|COA|保质期|批次|需粘贴|需黏贴|要求|需要|仓库|附件)[^）\)]*[）\)].*$',
-                    '', order["address"]).strip()
-                # 去掉地址末尾跟的英文/数字杂音（如 "ALD096100-FVW(CC)"），但保留中文地址主体
-                order["address"] = re.sub(r'[A-Za-z0-9\-]+[（\(][^）\)]+[）\)][A-Za-z0-9\-]*\s*$', '', order["address"])
-                if requirement_was_cleared:
-                    pass  # address already correct
-                return order
+                    '', req_addr).strip()
+                req_addr = re.sub(r'[A-Za-z0-9\-]+[（\(][^）\)]+[）\)][A-Za-z0-9\-]*\s*$', '', req_addr)
+
+                # 只有 requirement 提取的地址包含具体路/街/道/号/村等特征时才采用
+                # 否则可能是备注文字中的非地址片段（如"报备给园区安环"→"园区安环"被误匹配）
+                if re.search(r'[路街道号村]', req_addr):
+                    order["address"] = req_addr
+                    if requirement_was_cleared:
+                        pass
+                    return order
 
             # 兜底：如果标准地址模式匹配失败，尝试从 requirement 中的 "交易地址：" 提取
             trade_match = re.search(r'交易地址\s*[:：]\s*([\u4e00-\u9fa5\w\-（()）+、，。]+?)(?:联系人|$)', requirement)
@@ -341,6 +344,20 @@ class AddressNormalizer:
                 # 直辖市/特殊城市处理
                 if province in ["北京市", "天津市", "上海市", "重庆市"]:
                     city = province
+
+                # ── 优先使用县级市/区名（更具体） ──────────────────
+                # 规则：当 county 是县级市（以"市"结尾且非直辖市下辖区）时，用它覆盖 city
+                # 例如"常熟市"→用"常熟"而非"苏州"，"慈溪市"→用"慈溪"而非"宁波"
+                if county and county != city:
+                    county_clean = county.rstrip("市").rstrip("区").rstrip("县")
+                    # 县级市（以"市"结尾）→ 使用 county 作为城市
+                    if county.endswith("市"):
+                        city = county
+                    # 区/县且不是直辖市下辖 → 如果地址中没有更高级别城市特征，用 county
+                    elif province not in ["北京市", "天津市", "上海市", "重庆市"]:
+                        # 如果 county 是"区"且 city 是地级市，仍用 city（区属于地级市）
+                        # 但如果 county 是县级市（如省直管），保持 city 不变
+                        pass
 
                 # 针对一些没有明确市的情况（如海南省直辖县级），使用 county 作为城市补充
                 if province and (not city or city == "直辖县级" or city == "省直辖县级行政区划"):

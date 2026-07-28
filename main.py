@@ -146,12 +146,24 @@ def main():
                             fn_orders = re.findall(r'(11\d{6,8})', filename)
                             order_nos.update(fn_orders)
 
+                # 尝试从正文开头提取危险品信息（表格中的 DG/NDG）
+                body_head_danger = ""
+                if body:
+                    table_data = ContentParser.parse_shipping_mail(subject, body[:200].strip())
+                    if table_data:
+                        for on_from_table, info in table_data.items():
+                            if info.get("danger"):
+                                body_head_danger = info["danger"]
+                                break
+
                 if order_nos:
                     for on in order_nos:
                         cur = shipping_cache.get(on, {})
                         if cur.get("shipping") != shipping_from_subject:
+                            # 优先使用表格中提取的 danger，其次保留原有值
+                            new_danger = body_head_danger or cur.get("danger", "")
                             shipping_cache[on] = {"shipping": shipping_from_subject,
-                                                  "danger": cur.get("danger", "")}
+                                                  "danger": new_danger}
                             shipping_updated = True
             else:
                 # 其他人 SHIPPING_INFO 邮件：首次写入后永不覆盖
@@ -237,16 +249,28 @@ def main():
                         pdf_order_no = normalized.get("order_no", "").strip()
                         if not pdf_order_no or len(pdf_order_no) < 4:
                             continue
+
+                        # 过滤无效解析结果：必须至少有地址、重量或数量等核心字段
+                        has_core_field = bool(
+                            normalized.get("address") or
+                            normalized.get("weight") or
+                            normalized.get("quantity") or
+                            normalized.get("company_name")
+                        )
+                        if not has_core_field:
+                            logger.info(f"  → 跳过空解析结果 {pdf_order_no}（来自 {filename}）")
+                            continue
+
                         if pdf_order_no in shipping_cache:
                             sc = shipping_cache[pdf_order_no]
                             normalized.setdefault("发运方式", sc.get("shipping", ""))
-                            if not normalized.get("危险品类别"):
-                                normalized["危险品类别"] = sc.get("danger", "")
-                        # PDF 原文解析结果覆盖（优先级最高）
-                        pdf_danger = parsed.get("pdf_danger", "")
-                        if pdf_danger:
-                            if not normalized.get("危险品类别"):
+                        # 优先级：PDF 解析结果 > shipping 缓存
+                        if not normalized.get("危险品类别"):
+                            pdf_danger = parsed.get("pdf_danger", "")
+                            if pdf_danger:
                                 normalized["危险品类别"] = pdf_danger
+                        if not normalized.get("危险品类别") and pdf_order_no in shipping_cache:
+                            normalized["危险品类别"] = shipping_cache[pdf_order_no].get("danger", "")
                         update_instructions[pdf_order_no] = normalized
                         logger.info(f"  → 更新订单 {pdf_order_no}（来自 PDF）")
 
@@ -270,12 +294,13 @@ def main():
                         if pdf_order_no in shipping_cache:
                             sc = shipping_cache[pdf_order_no]
                             normalized.setdefault("发运方式", sc.get("shipping", ""))
-                            if not normalized.get("危险品类别"):
-                                normalized["危险品类别"] = sc.get("danger", "")
-                        pdf_danger = parsed.get("pdf_danger", "")
-                        if pdf_danger:
-                            if not normalized.get("危险品类别"):
+                        # 优先级：PDF 解析结果 > shipping 缓存
+                        if not normalized.get("危险品类别"):
+                            pdf_danger = parsed.get("pdf_danger", "")
+                            if pdf_danger:
                                 normalized["危险品类别"] = pdf_danger
+                        if not normalized.get("危险品类别") and pdf_order_no in shipping_cache:
+                            normalized["危险品类别"] = shipping_cache[pdf_order_no].get("danger", "")
                         parsed_list.append((pdf_order_no, normalized, filename))
 
                     if len(parsed_list) >= 2:
@@ -359,17 +384,31 @@ def main():
                 if not order_no or len(order_no) < 4 or not any(c.isdigit() for c in order_no):
                     continue
 
+                # 过滤无效解析结果：必须至少有地址、重量或数量等核心字段
+                has_core_field = bool(
+                    normalized.get("address") or
+                    normalized.get("weight") or
+                    normalized.get("quantity") or
+                    normalized.get("company_name")
+                )
+                if not has_core_field:
+                    logger.info(f"  → 跳过空解析结果 {order_no}（来自 {filename}）")
+                    continue
+
                 if order_no in shipping_cache:
                     sc = shipping_cache[order_no]
                     normalized.setdefault("发运方式", sc.get("shipping", ""))
-                    if not normalized.get("危险品类别"):
-                        normalized["危险品类别"] = sc.get("danger", "")
-                # 如果 shipping 缓存中没有危险品类别，从 PDF 中提取
+
+                # 优先级：PDF 解析结果 > shipping 缓存 > 留空
+                # 1) 先检查 FieldNormalizer.normalize 是否已写入 pdf_danger
+                # 2) 若无，则从 parsed 中获取 pdf_danger
+                # 3) 最后才从 shipping 缓存中读取
                 if not normalized.get("危险品类别"):
                     pdf_danger = parsed.get("pdf_danger", "")
                     if pdf_danger:
                         normalized["危险品类别"] = pdf_danger
-
+                if not normalized.get("危险品类别") and order_no in shipping_cache:
+                    normalized["危险品类别"] = shipping_cache[order_no].get("danger", "")
                 new_orders_dict[order_no] = normalized
 
             seen_uids.add(str(uid))

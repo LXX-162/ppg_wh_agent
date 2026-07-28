@@ -204,8 +204,8 @@ class PendingOrdersManager:
                 new_entry["synced_at"] = None
                 pending[order_no] = new_entry
                 changed += 1
-            elif existing.get("sync_status") in ("anomaly", "已取消", "已更新"):
-                # 异常/已取消/已更新 的订单保持不变
+            elif existing.get("sync_status") in ("anomaly", "已取消"):
+                # 异常/已取消 的订单保持不变
                 pass
             elif existing.get("sync_status") == "synced":
                 # 检查内容是否有变化（比较除状态字段外的核心字段）

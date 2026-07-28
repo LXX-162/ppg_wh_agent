@@ -108,12 +108,19 @@ def sync():
     # 全部 pending 不分日期，全部写入
     to_write = list(all_pending)
 
-    to_write.sort(key=lambda o: (
-        o.get("到货省份", ""),
-        o.get("到货城市", ""),
-        o.get("address", ""),
-        o.get("order_no", "")
-    ))
+    def sort_key(o):
+        d = parse_order_date(o)
+        # 将 None 日期排到最后
+        date_key = d.isoformat() if d else "9999-99-99"
+        return (
+            date_key,
+            o.get("到货省份", ""),
+            o.get("到货城市", ""),
+            o.get("address", ""),
+            o.get("order_no", ""),
+        )
+
+    to_write.sort(key=sort_key)
 
     # 输出 orders.json
     json_path = os.path.join("output", f"orders_{today.isoformat()}.json")

@@ -86,12 +86,41 @@ class ContentParser:
                 delivery_no = block[delivery_idx]
                 
                 danger = ""
-                # 如果这个块中存在单独一行的 DG 或 NDG
+                # 策略1: 如果这个块中存在单独一行的 DG 或 NDG
                 for item in block:
                     item_upper = item.upper()
                     if item_upper in ["DG", "NDG"]:
                         danger = item_upper
                         break
+                
+                # 策略2: 查找包含 "危险品" 表头的行，看同行或下一行是否有 DG/NDG
+                if not danger:
+                    for i, item in enumerate(block):
+                        if "危险" in item:
+                            # 检查当前行
+                            dg_match = re.search(r'\b(DG|NDG)\b', item.upper())
+                            if dg_match:
+                                danger = dg_match.group(1)
+                                break
+                            # 检查下一行（如果存在）
+                            if i + 1 < len(block):
+                                dg_match2 = re.search(r'\b(DG|NDG)\b', block[i + 1].upper())
+                                if dg_match2:
+                                    danger = dg_match2.group(1)
+                                    break
+                
+                # 策略3: 在块中查找独立出现的 DG/NDG 单词（非产品编码上下文）
+                if not danger:
+                    for item in block:
+                        item_upper = item.upper()
+                        # 匹配独立的 DG/NDG（前后是空格或行首/行尾）
+                        dg_match = re.search(r'(?:^|\s)(DG|NDG)(?:\s|$)', item_upper)
+                        if dg_match:
+                            # 排除产品编码中的 DG 子串（如 BYPWB1DG02）
+                            item_clean = re.sub(r'[A-Z0-9]{6,}', '', item_upper)
+                            if re.search(r'(?:^|\s)(DG|NDG)(?:\s|$)', item_clean):
+                                danger = dg_match.group(1)
+                                break
                 
                 result[delivery_no] = {
                     "shipping": shipping,
@@ -263,9 +292,10 @@ class ContentParser:
             r'(实际|计划)发货|July|August|January|February|March|April|May|June|'
             r'September|October|November|December', re.IGNORECASE
         )
-        # 地址起始：2~8个汉字后跟省市关键词
+        # 地址起始：4~8个汉字后跟省市关键词（在公司名提取中仅用于 rescued_suffix 判断，
+        # 最小4字避免误截如"昆山开发区"、"常州市"等公司名）
         _ADDR_START = re.compile(
-            r'[\u4e00-\u9fa5]{2,8}(?:省|市|自治区|自治州|开发区|新区|高新区|实验区|县)'
+            r'[\u4e00-\u9fa5]{4,8}(?:省|市|自治区|自治州|开发区|新区|高新区|实验区|县)'
         )
 
         # ── 第一段：~ 到 Frt bill ────────────────────────────────────
@@ -319,12 +349,9 @@ class ContentParser:
                     fragments.append(None)
                 continue
 
-            # 截断到地址起始处
-            addr_m = _ADDR_START.search(ln)
-            if addr_m:
-                ln = ln[:addr_m.start()].strip()
-            if ln:
-                fragments.append(ln)
+            # 行内容为公司名片段，地址提取由 extract_address 负责，
+            # 此处不截断，以免误将含"市/区/开发区"的公司名截断
+            fragments.append(ln)
 
         # ── 拼接：按 rescued_suffix 的完整性决定策略 ────────────────
 
@@ -364,11 +391,6 @@ class ContentParser:
             # (处理公司名被 PPG 行打断跨行的情况)
             company_name = "".join(f for f in fragments if f is not None)
 
-        # ── 截断到地址起始处 ──────────────────────────────────────
-        addr_m = _ADDR_START.search(company_name)
-        if addr_m:
-            company_name = company_name[:addr_m.start()].strip()
-
         # ── 兜底：若仍为空，取 ~ 后原始第一行（PPG 自家公司名）────────
         if not company_name:
             for ln in lines:
@@ -378,12 +400,8 @@ class ContentParser:
                 if date_m:
                     ln = ln[:date_m.start()].strip()
                 if ln:
-                    addr_m = _ADDR_START.search(ln)
-                    if addr_m:
-                        ln = ln[:addr_m.start()].strip()
-                    if ln:
-                        logger.info(f"提取 [公司名] -> 成功(PPG兜底): {ln}")
-                        return ln
+                    logger.info(f"提取 [公司名] -> 成功(PPG兜底): {ln}")
+                    return ln
             return ""
 
         logger.info(f"提取 [公司名] -> 成功: {bool(company_name)} | 内容: {company_name}")
@@ -452,6 +470,8 @@ class ContentParser:
             # PSN: PAINT - NOT REGULATED → 明确的无危险品标记
             if 'NOT REGULATED' in after_un_none.upper():
                 return "NDG"
+            # 即使 PSN 中没出现 NOT REGULATED，UN None 本身也代表无危险品
+            return "NDG"
 
         # 兜底2：如果有数据行中有明显的 DG 危险品类别
         # 在 UN 数字 后面，找 数字(类别) + P G III/II/I 模式
@@ -460,6 +480,31 @@ class ContentParser:
             after_un = text[un_num.end():un_num.end() + 200]
             if re.search(r'\b\d+(?:\.\d+)?\s+P\s*G\s+[IVXL]+\b', after_un):
                 return "DG"
+
+        # 兜底3：检测 PSN 行中的 NOT REGULATED / NOT RESTRICTED → NDG
+        # 有些 PDF 使用表头格式 "UN No. Description ..."，没有标准的 UN 数字行
+        # 但会有 PSN 行标记物品性质
+        psn_match = re.search(r'PSN:\s*(.+?)(?:\n|$)', text, re.IGNORECASE)
+        if psn_match:
+            psn_text = psn_match.group(1).upper()
+            if 'NOT REGULATED' in psn_text or 'NOT RESTRICTED' in psn_text:
+                return "NDG"
+
+        # 兜底4：检测文本中是否包含明确的 DG/NDG 标记（在非产品编码上下文中）
+        # 避免匹配产品编码中的 DG 子串（如 BYPWB1DG02）
+        # 在 UN 数据区域附近（而非产品编码行）找独立出现的 DG/NDG
+        un_area = re.search(r'UN\s+(?:No\.?\s*Description|None|\d+)', text, re.IGNORECASE)
+        if un_area:
+            area_start = un_area.start()
+            area_end = min(len(text), area_start + 500)
+            area_text = text[area_start:area_end]
+            # 排除产品编码行（含数字字母组合或以数字结尾的长编码行）
+            lines = area_text.split('\n')
+            for line in lines:
+                line_upper = line.strip().upper()
+                # 独立 DG/NDG 标记（非产品编码上下文）
+                if re.search(r'(?:^|\s)(DG|NDG)(?:\s|$)', line_upper):
+                    return 'DG' if 'DG' in line_upper and 'NDG' not in line_upper else 'NDG'
 
         return ""
 
