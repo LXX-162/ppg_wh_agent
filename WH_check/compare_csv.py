@@ -47,7 +47,6 @@ def parse_date_input(date_str, default_year=2026):
 
 def get_date_range_from_user():
     print()
-    print('='*60)
     print('请选择要对比的日期范围（默认年份为2026年）')
     print('='*60)
     print('支持格式示例：')
@@ -241,12 +240,17 @@ def compare_csv_with_excel(csv_file_path, excel_file_path,
     df_excel_ma = df_excel[df_excel['始发城市'] == '马鞍山库'].copy()
     print('Excel台账（仅马鞍山库）:', len(df_excel_ma), '条')
 
-    excel_ma_order_nos = set(str(o) for o in df_excel_ma['单号'] if pd.notna(o))
 
-    # === 筛选CSV中存在于台账的订单 ===
-    csv_filtered = df_csv[df_csv['单号'].apply(
-        lambda x: str(x).strip() in excel_ma_order_nos if pd.notna(x) else False
-    )].copy()
+
+    # === CSV同样只保留马鞍山库的订单（与台账口径一致） ===
+    # 注意：这里不再按“单号是否存在于台账”来预过滤CSV，
+    # 否则CSV中台账没有的订单（即CSV多出的订单）会被静默丢弃，
+    # 导致“CSV多出订单号”永远为空。
+    if '始发城市' in df_csv.columns:
+        df_csv['始发城市_str'] = df_csv['始发城市'].astype(str).str.strip()
+        csv_filtered = df_csv[df_csv['始发城市_str'] == '马鞍山库'].copy()
+    else:
+        csv_filtered = df_csv.copy()
 
     # 进一步按日期筛选CSV
     if start_date and end_date:
@@ -256,7 +260,7 @@ def compare_csv_with_excel(csv_file_path, excel_file_path,
         except Exception as e:
             print('CSV日期筛选失败:', e)
 
-    print('CSV（匹配台账订单）:', len(csv_filtered), '条')
+    print('CSV（马鞍山库）:', len(csv_filtered), '条')
 
     # === 构建字典 ===
     excel_dict = {}
