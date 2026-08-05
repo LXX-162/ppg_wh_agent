@@ -183,8 +183,15 @@ class ContentParser:
             return sub_text.strip()
 
     @staticmethod
-    def extract_order_no(text: str, filename: str = "") -> str:
-        # 1. 优先通过正文的“发货单号:”来识别，过滤掉中间可能的乱码（比如二维码）
+    def extract_order_no(text: str, filename: str = "", coord_order_no: str = "") -> str:
+        # 0. PDF 内部"发货单号"坐标层提取的单号最权威。
+        #    用户明确：当 PDF 内部读出的单号与文件名单号冲突时，以 PDF 内部为准（文件名可能出错）。
+        #    因此只要坐标层能取到合法订单号（11 开头的连续数字），就直接采用，不再让文件名覆盖它。
+        if coord_order_no and re.fullmatch(r'11\d{6,}', coord_order_no):
+            logger.info(f"提取 [单号] (来自 PDF 坐标层) -> 成功: True | 内容: {coord_order_no}")
+            return coord_order_no
+
+        # 1. 优先通过正文的"发货单号:"来识别，过滤掉中间可能的乱码（比如二维码）
         match = re.search(r'发货单号\s*[:：]([\s\S]{0,100})', text)
         if match:
             chunk = match.group(1)
@@ -199,6 +206,26 @@ class ContentParser:
             first_line = chunk.split('\n')[0]
             digits_only = re.sub(r'\D', '', first_line)
             if digits_only.startswith('11') and len(digits_only) >= 8:
+                # ── 交叉校验：乱码重构的数字可能与文件名中的真号不一致 ──
+                # 场景：pdfplumber 常把发货单号区渲染成如 "Í 11+9Ä6m767)22Î" 的乱码，
+                #       去掉非数字字符后得到 119676722（混入杂音数字），而正确单号是 11967722。
+                #       文件名（如 91_Delivery Docket - 11967722.pdf）通常保留原始正确单号。
+                # 规则：若文件名中存在明确的 11 开头单号：
+                #        - 与文本重构结果一致 → 用文本；
+                #        - 不一致 → 认为文本被杂音污染，采用文件名单号（并告警）。
+                if filename:
+                    fn_match = re.search(r'(11\d{6,})', filename)
+                    if fn_match:
+                        fn_no = fn_match.group(1)
+                        if fn_no == digits_only:
+                            logger.info(f"提取 [单号] (文本乱码过滤+文件名一致) -> 成功: True | 内容: {digits_only}")
+                            return digits_only
+                        else:
+                            logger.warning(
+                                f"提取 [单号] (文本乱码={digits_only} 与文件名={fn_no} 不一致，"
+                                f"采用文件名) -> 内容: {fn_no}"
+                            )
+                            return fn_no
                 logger.info(f"提取 [单号] (来自文本发货单号-乱码过滤) -> 成功: True | 内容: {digits_only}")
                 return digits_only
             
@@ -229,8 +256,19 @@ class ContentParser:
 
     @staticmethod
     def extract_order_date(text: str) -> str:
-        match = re.search(r'(计划发货|实际发货)[:：]\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}|\d{4}[-/]\d{1,2}[-/]\d{1,2})', text)
-        result = match.group(2) if match else ""
+        """
+        提取订单日期。PDF 中可能同时存在"计划发货"和"实际发货"两个日期。
+        规则：优先使用"实际发货"日期；如果没有实际发货，才使用"计划发货"。
+        """
+        # 优先匹配"实际发货"，如果存在则直接返回
+        match_actual = re.search(r'实际发货[:：]\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}|\d{4}[-/]\d{1,2}[-/]\d{1,2})', text)
+        result = match_actual.group(1) if match_actual else ""
+
+        # 如果没有"实际发货"，再尝试匹配"计划发货"
+        if not result:
+            match_plan = re.search(r'计划发货[:：]\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}|\d{4}[-/]\d{1,2}[-/]\d{1,2})', text)
+            result = match_plan.group(1) if match_plan else ""
+
         logger.info(f"提取 [日期] -> 成功: {bool(result)} | 内容: {result}")
         return result
 
@@ -516,8 +554,99 @@ class ContentParser:
             match = re.search(r'客.*?户.*?联.*?系.*?人.*?(?:[:：\?？]+)(.*?)(?:PPG|运输|承运|发货单号|电话|\n|$)', text, re.IGNORECASE)
             if match:
                 result = match.group(1).strip()
+
+        # 兜底：仅当常规提取结果为空，或不含有效联系人（如 PDF 抓到了 "Carrier Í+ÄMO-Î"
+        # 这类纯英文乱码、没有中文姓名）时，才尝试"跨行姓名+电话"增强提取。
+        # 适用场景：联系人姓名出现在客户要求区域（收货人:XX / 联系人:XX），但电话号码
+        # 被 PDF 排版、批准人(Approve) 区域分隔/打散，常规 extract_block 抓不到。
+        # 例："收货人：伊\n批准人：...\nApprove 源清 电话：15957454554" -> "伊源清 15957454554"
+        # 注意：若已有含中文姓名的结果（如 "刘淑英 0431-82561537"），即使不含手机号
+        # 也不再覆盖，避免用错误的地址含义误判成新的联系人。
+        if not re.search(r'[\u4e00-\u9fa5]{2,}', result):
+            enhanced = ContentParser._extract_contact_enhanced(text)
+            if enhanced:
+                result = enhanced
+
         logger.info(f"提取 [联系人] -> 成功: {bool(result)} | 内容: {result}")
         return result
+
+    @staticmethod
+    def _extract_contact_enhanced(text: str) -> str:
+        """
+        兜底增强联系人提取：在全文范围寻找手机号（支持 156 1882 7168 这类带空格/连字符的分段）
+        并将手机号附近（前后各 ~200 字符窗口内）的最近中文姓名关联上，还原"姓名 + 电话号码"，
+        处理姓名与电话被批准人/换行/客户要求区域分隔打散的情况。
+
+        姓名来源优先级：
+          1. 手机号紧密前文中的"收货人/联系人/收件人：XX"、或"Approve XX"里的中文姓名
+          2. 窗口内距手机号最近、且非噪声词的中文 2~6 字人名
+        黑名单过滤掉"承运商/运输公司/操作人/批准人/色浆/包装"等非人名干扰。
+        """
+        # 手机号：1[3-9] 后 8 位数字，数字间可含单个空格/连字符（3-4-4 分段）
+        phone_re = re.compile(r'1[3-9]\d(?:[\s-]?\d){8}')
+        # 黑名单：用于过滤被误抓为姓名的字段名/关键词
+        NOISE = re.compile(
+            r'(承运|运输|PPG|操作|批准|收货|联系|收件|电话|仓库|有限|公司|'
+            r'发货|单号|订单|要求|需要|地址|送到|自提|安全|求助|求助电话|报到|'
+            r'道口|平台|包装|色浆|使用|必须|营业部|批次|传真|客户|签收)'
+        )
+        out = []
+        for m in phone_re.finditer(text):
+            phone_raw = m.group(0)
+            # 规整电话号码（去掉内部空格/连字符）
+            phone = re.sub(r'[\s-]', '', phone_raw)
+            end = min(len(text), m.end())
+
+            # 前后各取 80 字符窗口（电话跨度小，就近找姓名）
+            head_start = max(0, m.start() - 80)
+            head = text[head_start:m.start()] + ' ' + text[end:end + 60]
+
+            # 1) 优先：电话前的显式标签（收货人/联系人/收件人/Approve）
+            labels = [x.group(1) for x in re.finditer(
+                r'(?<![\u4e00-\u9fa5])(?:收货人|联系人|收件人)[:：]\s*([\u4e00-\u9fa5]{1,8})',
+                head)]
+            labels = [x for x in labels if x and not NOISE.search(x)]
+            approves = [x.group(1) for x in re.finditer(
+                r'Approve\s*([\u4e00-\u9fa5]{1,8})', head)]
+            approves = [x for x in approves if x and not NOISE.search(x)]
+
+            name = ''
+            if labels:
+                labels.sort(key=lambda s: -len(s))
+                name = labels[0]
+            if approves:
+                part = approves[-1]
+                if part not in name:
+                    name = (name + part) if name else part
+                name = name[:6]
+
+            # 2) 兜底：窗口内距手机号最近、且非噪声的中文 2~6 字人名
+            #    （覆盖"客户要求区域里的人名 + 电话在批准人/Approve 后"的跨行场景）
+            if not name:
+                window = text[head_start:min(len(text), m.end() + 60)]
+                best = None
+                best_dist = None
+                for nm in re.finditer(r'[\u4e00-\u9fa5]{2,6}', window):
+                    cand = nm.group(0)
+                    if NOISE.search(cand):
+                        continue
+                    abs_pos = head_start + nm.start()
+                    dist = abs_pos - m.start()  # 负=电话前，正=电话后
+                    if best_dist is None or abs(dist) < best_dist:
+                        best_dist = abs(dist)
+                        best = cand
+                if best:
+                    name = best[:6]
+
+            if name and not NOISE.search(name):
+                out.append(f'{name} {phone}')
+
+        seen, result = set(), []
+        for c in out:
+            if c not in seen:
+                seen.add(c)
+                result.append(c)
+        return ' '.join(result)
 
     @staticmethod
     def extract_address(text: str) -> str:
@@ -696,12 +825,12 @@ class ContentParser:
         return result
 
     @staticmethod
-    def parse_pdf_text(raw_text: str, filename: str = "") -> dict:
+    def parse_pdf_text(raw_text: str, filename: str = "", coord_order_no: str = "") -> dict:
         norm_text = ContentParser.normalize_text(raw_text)
         
         logger.info("=== 开始解析 PDF 字段 ===")
         
-        order_no = ContentParser.extract_order_no(norm_text, filename)
+        order_no = ContentParser.extract_order_no(norm_text, filename, coord_order_no)
         order_date = ContentParser.extract_order_date(norm_text)
         address = ContentParser.extract_address(norm_text)
         contact = ContentParser.extract_contact(norm_text)

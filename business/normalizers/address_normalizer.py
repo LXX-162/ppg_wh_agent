@@ -3,6 +3,12 @@ import re
 class AddressNormalizer:
     """业务修正规则：地址与相关实体（收货单位、省市区）"""
 
+    # 地址末端特征字集合：用于判断某段文本是否"看起来像完整地址"。
+    # 需与下方 addr_pattern 的结尾词保持一致，确保以"号/栋/座/室/楼/门/弄/口"等
+    # 收尾、但没带"路/街/道/号/村"的地址（如"安徽省淮南市寿县万洋众创城A28栋"）
+    # 也能被正确识别，避免此类地址被误判跳过而回退到原始错误地址。
+    _ADDR_FEATURE_CHARS = r'[路街道号村栋座室楼门弄口]'
+
     @classmethod
     def normalize_address(cls, order: dict) -> dict:
         """
@@ -29,7 +35,8 @@ class AddressNormalizer:
         req_lower = requirement.replace(" ", "").lower()
         has_baowen = "保温" in req_lower
         has_changshu = "常熟" in req_lower
-        phone_addr_has_features = bool(re.search(r'[路街道号村]', address))
+
+        phone_addr_has_features = bool(re.search(cls._ADDR_FEATURE_CHARS, address))
         if has_baowen and has_changshu and phone_addr_has_features:
             # 保留 content_parser 提取的地址，不从 requirement 覆盖
             # 清空 requirement 使其不被下游的 addr_pattern 匹配到
@@ -76,10 +83,7 @@ class AddressNormalizer:
                     r'\s*[（\(](?:随货|携带|COA|保质期|批次|需粘贴|需黏贴|要求|需要|仓库|附件)[^）\)]*[）\)].*$',
                     '', req_addr).strip()
                 req_addr = re.sub(r'[A-Za-z0-9\-]+[（\(][^）\)]+[）\)][A-Za-z0-9\-]*\s*$', '', req_addr)
-
-                # 只有 requirement 提取的地址包含具体路/街/道/号/村等特征时才采用
-                # 否则可能是备注文字中的非地址片段（如"报备给园区安环"→"园区安环"被误匹配）
-                if re.search(r'[路街道号村]', req_addr):
+                if re.search(cls._ADDR_FEATURE_CHARS, req_addr):
                     order["address"] = req_addr
                     if requirement_was_cleared:
                         pass
@@ -160,6 +164,58 @@ class AddressNormalizer:
         return order
 
     _cached_receiver_list = None
+
+    # 省份/城市解析结果缓存（key: dense 地址字符串）
+    _region_cache = {}
+
+    @staticmethod
+    def _strip_region_suffix(value: str) -> str:
+        """去掉省/市/自治区等行政后缀，只保留地名核心（浙江、安徽等）。"""
+        for suffix in [
+            "维吾尔自治区", "壮族自治区", "回族自治区", "自治区",
+            "特别行政区", "自治州", "自治县", "地区", "设区市",
+            "市", "省", "盟", "县",
+        ]:
+            if value.endswith(suffix):
+                return value[:-len(suffix)]
+        return value
+
+    @classmethod
+    def _parse_region(cls, text_dense: str):
+        """
+        用 jionlp 解析地址，返回 (province, city, county)。
+        三个值均已去掉行政后缀（如 "浙江省" -> "浙江"，"芜湖市" -> "芜湖"）。
+        解析失败或未识别返回空字符串；解析结果做内存缓存避免对大量候选地址重复解析。
+        """
+        if not text_dense:
+            return "", "", ""
+        if text_dense in cls._region_cache:
+            return cls._region_cache[text_dense]
+
+        result = ("", "", "")
+        import sys
+        old_stdout = sys.stdout
+        sys.stdout = open("NUL", "w")
+        try:
+            # pyrefly: ignore [missing-import]
+            import jionlp as jio
+        except Exception:
+            return "", "", ""
+        finally:
+            sys.stdout.close()
+            sys.stdout = old_stdout
+
+        try:
+            res = jio.parse_location(text_dense)
+            prov = cls._strip_region_suffix(res.get("province", "") or "")
+            city = cls._strip_region_suffix(res.get("city", "") or "")
+            county = cls._strip_region_suffix(res.get("county", "") or "")
+            result = (prov, city, county)
+        except Exception:
+            result = ("", "", "")
+
+        cls._region_cache[text_dense] = result
+        return result
 
     @classmethod
     def get_receiver_list(cls):
@@ -299,7 +355,17 @@ class AddressNormalizer:
             order["address_exact_match"] = "模糊匹配"
         else:
             # 兜底：即使没有任何记录通过模糊匹配，也从全库中挑出得分最高的一条
-            # 按收货单位名称与文本池的字符重合度评分
+            # 按收货单位名称 + 地址字符合合度 + 省市级强权重评分。
+
+            # 省/市/区县的强权重（显著高于基础字符重合分，避免长地址或常见字占优）
+            REGION_BONUS_PROV = 100
+            REGION_BONUS_CITY = 60
+            REGION_BONUS_COUNTY = 30
+
+            # 用 jionlp 解析订单地址，得到订单的省/市/区县（去掉行政后缀）。
+            order_addr_dense = norm_addr_dense or text_pool_dense
+            order_prov, order_city, order_county = cls._parse_region(order_addr_dense)
+
             def score_record(rec):
                 name = rec["receiver"]
                 addr = rec["address"]
@@ -307,7 +373,22 @@ class AddressNormalizer:
                 name_score = sum(1 for c in name if c in text_pool_dense) * 2
                 # 地址字符与文本池的重合度
                 addr_score = sum(1 for c in addr if c in text_pool_dense)
-                return name_score + addr_score
+                base_score = name_score + addr_score
+
+                # ── 省市级强权重 ──────────────────────────────
+                # 若无法解析出订单省份，则不强加省市权重（退回纯字符重合评分），
+                # 避免解析失败时误加分影响其他正常单子。
+                bonus = 0
+                if order_prov:
+                    prov, city, county = cls._parse_region(addr)
+                    if prov == order_prov:
+                        bonus += REGION_BONUS_PROV
+                    # 城市匹配（城市/区县相等，或订单城市出现在候选地址中）
+                    if order_city and (city == order_city or order_city in addr):
+                        bonus += REGION_BONUS_CITY
+                    if order_county and (county == order_county or order_county in addr):
+                        bonus += REGION_BONUS_COUNTY
+                return base_score + bonus
 
             if receiver_list:
                 best_fallback = max(receiver_list, key=score_record)

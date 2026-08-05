@@ -37,27 +37,78 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ── 邮件回复链 / 转发链边界识别 ────────────────────────────────────────────
+# 飞书 / Outlook 转发的典型格式（在"新内容"之后另起一行出现）：
+#   From: He, Jinlan
+#   Sent: Saturday, August 1, 2026 12:38 PM
+#   To: 'cs05@efs.com.cn'; ...
+#
+# 或中文格式：
+#   发件人: 何金兰
+#   发送时间: 2026年8月1日 12:38
+#   收件人: ...
+#
+# 或经典格式：
+#   -----Original Message-----
+_EMAIL_FORWARD_PATTERNS = [
+    # 经典 Western 邮件
+    re.compile(r'-----Original Message-----'),
+    # Outlook / Feishu 英文转发头：From: xxx 后跟 Sent: / 发送时间:
+    re.compile(r'^\s*From:\s*.+?\n(?:[^\n]*\n){0,4}?\s*(?:Sent|发送时间):\s*', re.MULTILINE),
+    # 中文转发头：
+    re.compile(r'^\s*(?:发件人|寄件人):\s*.+?\n(?:[^\n]*\n){0,3}?\s*(?:发送时间|送出时间):\s*', re.MULTILINE),
+]
+
+
+def _cut_at_reply_chain(body: str) -> str:
+    """
+    在正文中定位"回复 / 转发链"的起始位置并截断。
+    返回只含新邮件内容（不含历史回复）的正文；找不到边界时原样返回。
+    """
+    best = len(body)
+    for pat in _EMAIL_FORWARD_PATTERNS:
+        m = pat.search(body)
+        if m and m.start() < best:
+            best = m.start()
+    return body[:best]
+
+
 def _extract_body(msg) -> str:
-    """从邮件对象提取纯文本正文，并截断历史回复内容。"""
+    """从邮件对象提取纯文本正文，并在"回复/转发链"起始处截断。"""
+    body_parts = []
     if msg.is_multipart():
         for part in msg.walk():
             if part.get_content_type() == "text/plain":
                 payload = part.get_payload(decode=True)
                 if payload:
-                    body = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
-                    cutoff = body.find("-----Original Message-----")
-                    if cutoff != -1:
-                        body = body[:cutoff]
-                    return body.strip()
+                    part_text = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                    if part_text.strip():
+                        body_parts.append(part_text)
     else:
         payload = msg.get_payload(decode=True)
         if payload:
-            body = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
-            cutoff = body.find("-----Original Message-----")
-            if cutoff != -1:
-                body = body[:cutoff]
-            return body.strip()
-    return ""
+            part_text = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+            if part_text.strip():
+                body_parts.append(part_text)
+
+    if not body_parts:
+        return ""
+
+    # 取第一个非空 plain/text 部分，并截断回复/转发链
+    body = _cut_at_reply_chain(body_parts[0])
+    return body.strip()
+
+
+def _parse_pdf_docket(pdf_path: str) -> dict:
+    """
+    解析发货单 PDF：
+      - 先从 PDF【字符坐标层】精确提取"发货单号"（PDF 内部印刷的权威单号，不依赖文件名的
+        对不对），再结合文本与文件名解析各字段。
+    """
+    raw_text = PDFParser.parse_pdf(pdf_path)
+    coord_order_no = PDFParser.extract_order_no_coord(pdf_path)
+    filename = os.path.basename(pdf_path)
+    return ContentParser.parse_pdf_text(raw_text, filename=filename, coord_order_no=coord_order_no)
 
 
 def main():
@@ -114,7 +165,26 @@ def main():
             subject = m.get("subject", "") or str(msg.get("Subject", ""))
 
             if is_wenjuan:
-                # wenjuan 邮件：从标题取发运方式
+                # wenjuan 邮件：从标题取发运方式。
+                # 规则：仅在【正文无内容 且 附件为 PDF】时，wenjuan 主题才作为发运方式来源。
+                # 排除"以下发货缺少附件"一类的缺件表格邮件（正文有内容、列出
+                # 发货单号/SO/收货人/Item Number/批次/COA/色板），这类邮件主题虽常带
+                # "零担/保温车"等字样，但并非真实发运方式，会污染发运方式缓存。
+                body = _extract_body(msg)
+
+                # 判断是否携带 PDF 发货单附件
+                has_pdf_attach = False
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        filename = part.get_filename()
+                        if filename and filename.lower().endswith(".pdf"):
+                            has_pdf_attach = True
+                            break
+
+                # 正文有内容（如缺件表格/说明）或没有 PDF 附件 → 不采用 wenjuan 主题
+                if body or not has_pdf_attach:
+                    continue
+
                 shipping_from_subject = ""
                 for kw in ["保温车", "包车", "零担", "自提"]:
                     if kw in subject:
@@ -123,47 +193,24 @@ def main():
                 if not shipping_from_subject:
                     continue
 
-                # 收集订单号：仅从正文开头 200 字符 + PDF 附件名
-                # 注意：不扫描整个正文，避免回复链中的历史订单号污染
+                # 该场景正文为空，订单号来源为：PDF 附件名 + 主题
                 order_nos = set()
-                body = _extract_body(msg)
-
-                if body:
-                    body_head = body[:200].strip()
-                    # 1) 从正文表格解析（仅用正文开头）
-                    table_data = ContentParser.parse_shipping_mail(subject, body_head)
-                    if table_data:
-                        order_nos.update(table_data.keys())
-                    # 2) 正文开头中的 11 开头数字
-                    body_orders = re.findall(r'(11\d{6,8})', body_head)
-                    order_nos.update(body_orders)
-
-                # 3) 从 PDF 附件名提取（不限范围）
                 if msg.is_multipart():
                     for part in msg.walk():
                         filename = part.get_filename()
                         if filename:
                             fn_orders = re.findall(r'(11\d{6,8})', filename)
                             order_nos.update(fn_orders)
-
-                # 尝试从正文开头提取危险品信息（表格中的 DG/NDG）
-                body_head_danger = ""
-                if body:
-                    table_data = ContentParser.parse_shipping_mail(subject, body[:200].strip())
-                    if table_data:
-                        for on_from_table, info in table_data.items():
-                            if info.get("danger"):
-                                body_head_danger = info["danger"]
-                                break
+                subject_orders = re.findall(r'(11\d{6,8})', subject)
+                order_nos.update(subject_orders)
 
                 if order_nos:
                     for on in order_nos:
                         cur = shipping_cache.get(on, {})
                         if cur.get("shipping") != shipping_from_subject:
-                            # 优先使用表格中提取的 danger，其次保留原有值
-                            new_danger = body_head_danger or cur.get("danger", "")
+                            # 保留原有 danger（正文为空无法从表格提取）
                             shipping_cache[on] = {"shipping": shipping_from_subject,
-                                                  "danger": new_danger}
+                                                  "danger": cur.get("danger", "")}
                             shipping_updated = True
             else:
                 # 其他人 SHIPPING_INFO 邮件：首次写入后永不覆盖
@@ -183,12 +230,11 @@ def main():
             CacheManager.save_cache(shipping_cache, date_str=today)
 
         # ── 4. 处理邮件正文的业务指令（更新/取消/拆单）────────────
-        #    所有指令检测仅基于邮件正文开头 200 字符（新邮件开头才是真实意图）
+        #    正文已由 _extract_body 在"回复/转发链"处截断，
+        #    因此全文即"新邮件内容"，业务指令只基于新内容检测。
         cancel_orders      = set()      # 要取消的订单号
         update_instructions = {}        # { order_no: {新订单字段...} }
         split_new_orders   = {}         # { 新订单号: {订单字段...} }
-
-        BODY_HEAD_LEN = 200  # 只检测正文开头范围
 
         for m in mails:
             uid = m["uid"]
@@ -199,10 +245,10 @@ def main():
             if not body and not subject:
                 continue
 
-            # 正文开头（不含回复链）
-            body_head = body[:BODY_HEAD_LEN].strip()
+            # 正文（不含回复链）
+            body_head = body.strip()
             body_head_lower = body_head.lower()
-            # 正文开头+主题（这里主题也纳入检测，因为有些更新订单号在主题中）
+            # 正文+主题（这里主题也纳入检测，因为有些更新订单号在主题中）
             head_text = f"{subject} {body_head}"
 
             # ── 4a. 取消指令 ──────────────────────────────────────
@@ -217,7 +263,7 @@ def main():
 
             if is_cancel:
                 logger.info(f"[指令-取消] UID={uid}: {subject[:60]}")
-                # 仅从正文开头 200 字符提取订单号
+                # 从正文（不含回复链）+ 主题提取订单号
                 cancel_orders_in_head = re.findall(r'(11\d{6,8})', body_head)
                 # 也检查主题
                 cancel_orders_in_subject = re.findall(r'(11\d{6,8})', subject)
@@ -242,9 +288,7 @@ def main():
                 if update_targets:
                     saved_pdfs = save_attachments(uid, msg)
                     for pdf_path in saved_pdfs:
-                        raw_text = PDFParser.parse_pdf(pdf_path)
-                        filename = os.path.basename(pdf_path)
-                        parsed = ContentParser.parse_pdf_text(raw_text, filename=filename)
+                        parsed = _parse_pdf_docket(pdf_path)
                         normalized = FieldNormalizer.normalize(parsed)
                         pdf_order_no = normalized.get("order_no", "").strip()
                         if not pdf_order_no or len(pdf_order_no) < 4:
@@ -284,9 +328,7 @@ def main():
                     logger.info(f"[指令-拆单] UID={uid}: {subject[:60]}")
                     parsed_list = []
                     for pdf_path in pdf_attachments:
-                        raw_text = PDFParser.parse_pdf(pdf_path)
-                        filename = os.path.basename(pdf_path)
-                        parsed = ContentParser.parse_pdf_text(raw_text, filename=filename)
+                        parsed = _parse_pdf_docket(pdf_path)
                         normalized = FieldNormalizer.normalize(parsed)
                         pdf_order_no = normalized.get("order_no", "").strip()
                         if not pdf_order_no:
@@ -375,9 +417,7 @@ def main():
             saved_pdfs = save_attachments(uid, msg)
 
             for pdf_path in saved_pdfs:
-                raw_text = PDFParser.parse_pdf(pdf_path)
-                filename = os.path.basename(pdf_path)
-                parsed = ContentParser.parse_pdf_text(raw_text, filename=filename)
+                parsed = _parse_pdf_docket(pdf_path)
                 normalized = FieldNormalizer.normalize(parsed)
 
                 order_no = normalized.get("order_no", "").strip()
