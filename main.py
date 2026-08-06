@@ -1,7 +1,49 @@
 import sys
 import os
-import logging
+import subprocess
+
+# ── 第一步：确保依赖已安装（在所有其他导入之前） ──────────────────
+def ensure_dependencies():
+    """检查并自动安装 jionlp"""
+    try:
+        import jionlp
+        print("✅ jionlp 已安装")
+        return True
+    except ImportError:
+        print("⚠️ jionlp 未安装，正在自动安装...")
+        try:
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install", "jionlp",
+                "--index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
+                "--timeout", "120",
+                "--no-cache-dir"
+            ])
+            print("✅ jionlp 安装成功")
+            return True
+        except Exception as e:
+            print(f"❌ jionlp 安装失败: {e}")
+            # 尝试备用源
+            try:
+                print("🔄 尝试备用源安装...")
+                subprocess.check_call([
+                    sys.executable, "-m", "pip", "install", "jionlp",
+                    "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
+                    "--timeout", "120"
+                ])
+                print("✅ jionlp 安装成功")
+                return True
+            except Exception as e2:
+                print(f"❌ 备用源安装也失败: {e2}")
+                return False
+
+# 在导入任何其他模块之前先安装依赖
+if not ensure_dependencies():
+    print("❌ 关键依赖安装失败，程序退出")
+    sys.exit(1)
+
+# ── 第二步：现在才导入其他模块 ──────────────────────────────────────
 import io
+import logging
 import time
 import re
 import email.utils
@@ -35,6 +77,7 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 logger = logging.getLogger(__name__)
+
 
 
 # ── 邮件回复链 / 转发链边界识别 ────────────────────────────────────────────

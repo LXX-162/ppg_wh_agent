@@ -213,12 +213,15 @@ class PendingOrdersManager:
                 old_core = {k: v for k, v in existing.items() if k not in _IGNORE}
                 new_core = {k: v for k, v in new_entry.items() if k not in _IGNORE}
                 if old_core != new_core:
+                    # 改单：已写入但内容有变化 → 设为"已更新"
+                    # sync() 步骤4会用 batch_update_records 覆盖多维表已有记录
+                    # 而不是 pending（pending 会新增一行，导致多维表重复）
                     if not is_caller_status_specified:
-                        new_entry["sync_status"] = "pending"
+                        new_entry["sync_status"] = "已更新"
                     new_entry["synced_at"] = None
                     pending[order_no] = new_entry
                     changed += 1
-                    logger.info(f"[{order_no}] 内容有变化，重置为 pending")
+                    logger.info(f"[{order_no}] 内容有变化（改单），重置为 已更新")
             else:
                 # pending/其他状态：直接覆盖
                 if not is_caller_status_specified:

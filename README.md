@@ -14,21 +14,10 @@
 - [核心流程详解](#核心流程详解)
   - [邮件处理（main.py）](#邮件处理mainpy)
   - [多维表同步（sync_orders.py）](#多维表同步sync_orderspy)
-- [PDF 字段解析规则](#pdf-字段解析规则)
-  - [订单号提取](#订单号提取)
-  - [公司名提取](#公司名提取)
-  - [地址提取](#地址提取)
-  - [联系人提取](#联系人提取)
-  - [危险品识别](#危险品识别)
-- [业务字段清洗规则](#业务字段清洗规则)
-  - [日期规范化](#日期规范化)
-  - [客户要求清洗](#客户要求清洗)
-  - [联系人清洗](#联系人清洗)
-  - [地址规范化](#地址规范化)
-  - [收货单位匹配](#收货单位匹配)
-  - [到货省市提取](#到货省市提取)
-  - [发运方式与危险品类别](#发运方式与危险品类别)
-- [数据文件说明](#数据文件说明)
+- [业务指令处理](#业务指令处理)
+- [发运方式缓存（Shipping Cache）](#发运方式缓存shipping-cache)
+- [暂存区（PendingOrders）](#暂存区pendingorders)
+- [业务字段清洗流水线](#业务字段清洗流水线)
 - [多维表字段映射](#多维表字段映射)
 - [幂等性保证](#幂等性保证)
 
@@ -36,52 +25,34 @@
 
 ## 系统概述
 
-本系统从飞书邮箱（IMAP）中实时读取 PPG 发运相关邮件，解析 PDF 发货单并提取结构化订单数据，最终通过飞书 Aily 定时触发将当日订单按省市排序后批量写入飞书多维表。
+本系统每日自动完成以下工作：
 
-**核心特性：**
-
-- **邮件处理与多维表写入完全分离**：`main.py`（处理邮件）和 `sync_orders.py`（写入飞书）可独立运行
-- **基于 UID 的已读记录**：防止重复解析已处理的邮件
-- **组合发运信息**：从 `SHIPPING_INFO` 邮件提取发运方式/危险品类别，补充到 PDF 解析结果
-- **地址智能提取**：从客户要求、PDF 原文、原始地址多个来源按优先级提取
+1. **拉取邮件** —— 通过 IMAP 拉取邮箱全部邮件
+2. **更新发运缓存** —— 从 wenjuan / SHIPPING_INFO 邮件中提取发运方式与危险品信息，持久化到 `shipping_all.json`
+3. **识别业务指令** —— 解析邮件正文，自动执行取消、改单、拆单等操作
+4. **解析 PDF 发货单** —— 提取订单号、地址、重量、数量、联系人等字段
+5. **规范化字段** —— 通过多级清洗流水线标准化地址、联系人、发运方式等
+6. **写入暂存区** —— 新订单写入 `pending_orders.json` 暂存
+7. **同步飞书多维表** —— 将暂存区订单批量写入飞书多维表，同步取消/改单等状态变更
 
 ---
 
 ## 整体架构
 
 ```
-┌─────────────────────────────────────┐
-│  main.py（邮件处理）                  │
-│                                     │
-│  ① 连接 IMAP，拉取邮件                  │
-│  ② 更新 shipping 缓存（发运方式/DG）    │
-│  ③ 检测取消/更新/拆单指令               │
-│  ④ 解析新邮件 PDF 附件                 │
-│  ⑤ 字段清洗 → 合并入 pending_orders    │
-│  ⑥ 标记已读 UID                      │
-└─────────────┬───────────────────────┘
-              │ 输出: pending_orders.json
-              ▼
-┌─────────────────────────────────────┐
-│  sync_orders.py（飞书写入）           │
-│                                     │
-│  ① 加载 pending_orders.json         │
-│  ② 按业务日期分三类（今日/未来/异常）   │
-│  ③ 排序（省份→城市→地址→单号）        │
-│  ④ 输出 orders_YYYY-MM-DD.json       │
-│  ⑤ 先删今日多维表旧数据               │
-│  ⑥ 批量写入新数据                      │
-│  ⑦ 更新状态（synced/anomaly）        │
-└─────────────────────────────────────┘
-```
+邮件 (IMAP)
+    │
+    ▼
+main.py
+    ├── 1. 更新 Shipping Cache（wenjuan / SHIPPING_INFO 邮件）
+    ├── 2. 识别业务指令（取消 / 改单 / 拆单）
+    └── 3. 解析 PDF_ORDER → FieldNormalizer → PendingOrdersManager
 
-### 数据状态流转
-
-```
-邮件 ──解析──▶ pending ──今天──▶ synced
-                   │
-                   ├── 未来日期 ──▶ 继续 pending（等待）
-                   └── 历史日期 ──▶ anomaly（告警跳过）
+sync_orders.py
+    ├── 处理 已取消 → 修改多维表状态
+    ├── 处理 已更新 → 覆盖多维表记录
+    ├── 写入 pending / 拆单 → 新增多维表行
+    └── 输出 output/orders_YYYY-MM-DD.json
 ```
 
 ---
@@ -90,110 +61,102 @@
 
 ```
 ppg_wh_agent/
-├── main.py                     # 邮件处理入口（随时可运行）
-├── sync_orders.py              # 多维表写入入口（Aily 触发）
+├── main.py                    # 邮件拉取 & 解析主入口
+├── sync_orders.py             # 多维表写入入口
+├── inspect_orders.py          # 暂存区查询工具（开发辅助）
 ├── requirements.txt
-├── .env                        # 飞书/邮箱凭证（不入 git）
+├── .env                       # 环境变量（密钥等，不入库）
 │
-├── mail/                       # 邮件读取层
-│   ├── mail_reader.py          # IMAP 连接与邮件拉取（返回带 UID 的邮件列表）
-│   ├── mail_filter.py          # 邮件分类（SHIPPING_INFO / PDF_ORDER / UNKNOWN）
-│   └── email_saver.py          # PDF 附件保存
+├── mail/
+│   ├── mail_reader.py         # IMAP 邮件拉取
+│   ├── mail_filter.py         # 邮件类型识别（PDF_ORDER / SHIPPING_INFO / …）
+│   └── email_saver.py         # 附件保存
 │
-├── parser/                     # 原始数据解析层（忠于原文，不做业务判断）
-│   ├── pdf_parser.py           # PDF 文本提取（pdfplumber）
-│   └── content_parser.py       # 字段提取：订单号/日期/地址/联系人/要求/重量/数量/公司名/危险品
+├── parser/
+│   ├── pdf_parser.py          # PDF 文本提取 + 坐标层精确单号提取
+│   ├── content_parser.py      # 正文/PDF 文本字段解析
+│   └── schema.py              # 字段 schema 定义
 │
-├── business/                   # 业务规则层
-│   ├── field_normalizer.py     # 清洗流水线总控（按顺序调用各 Normalizer）
+├── business/
+│   ├── field_normalizer.py    # 业务清洗流水线总控
+│   ├── rule_engine.py         # 规则引擎
 │   └── normalizers/
-│       ├── address_normalizer.py     # 地址清洗、收货单位匹配、省市提取
-│       ├── contact_normalizer.py     # 联系人/电话提取
-│       ├── logistics_normalizer.py   # 发运方式、危险品类别
-│       ├── requirement_normalizer.py # 客户要求文本清洗
-│       └── order_info_normalizer.py  # 日期等基础信息规范化
+│       ├── order_info_normalizer.py   # 日期规范化
+│       ├── requirement_normalizer.py  # 客户要求清洗
+│       ├── contact_normalizer.py      # 联系人清洗
+│       ├── address_normalizer.py      # 地址规范化 / 收货单位匹配 / 到货省市
+│       └── logistics_normalizer.py    # 发运方式 & 危险品类别
 │
 ├── feishu/
-│   └── bitable.py              # 飞书多维表 API（读/写/按日期删除/批量更新）
+│   └── bitable.py             # 飞书多维表 API 封装
 │
 ├── utils/
-│   ├── cache_manager.py        # CacheManager（shipping 缓存）
-│   │                           # OrdersManager（按日期存订单）
-│   │                           # PendingOrdersManager（暂存区，含状态管理）
-│   ├── seen_mails.py           # 已读邮件 UID 记录
-│   └── config.py               # 配置加载
+│   ├── cache_manager.py       # CacheManager / PendingOrdersManager / OrdersManager
+│   ├── seen_mails.py          # 已读邮件 UID 持久化
+│   └── config.py              # 配置加载
 │
+├── file/                      # PDF 附件保存目录
 ├── output/
+│   ├── orders_YYYY-MM-DD.json           # 每日排序后的待同步订单
 │   └── cache/
-│       ├── pending_orders.json      # 订单暂存区（核心数据文件）
-│       ├── seen_mails.json          # 已读邮件 UID
-│       ├── shipping_YYYY-MM-DD.json # 每日 shipping 缓存
-│       └── shipping_all.json        # 全量累积 shipping 缓存
-│
-└── file/
-    └── pdf/                    # 保存的 PDF 附件（按 UID_原文件名 命名）
+│       ├── shipping_YYYY-MM-DD.json     # 每日发运缓存快照
+│       ├── shipping_all.json            # 全量历史发运缓存（累积合并）
+│       └── pending_orders.json          # 暂存区（所有状态订单）
+└── WH_check/                  # 其他检查脚本（独立工具）
 ```
 
 ---
 
 ## 环境配置
 
-复制 `.env.example`（若有）或创建 `.env` 文件：
+复制并填写 `.env` 文件：
 
 ```env
-# 邮箱配置（飞书 IMAP）
+# 邮件（IMAP）
 MAIL_HOST=imap.feishu.cn
-MAIL_USER=your-email@company.com
-MAIL_PASSWORD=your-password
+MAIL_PORT=993
+MAIL_USER=<邮箱账号>
+MAIL_PASSWORD=<邮箱密码>
 
-# 飞书开放平台（应用凭证）
-FEISHU_APP_ID=cli_xxxxxxxxxxxxxxxx
-FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# 多维表配置
-FEISHU_BITABLE_APP_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxx    # 多维表所在文档的 token
-FEISHU_BITABLE_TABLE_ID=tblxxxxxxxxxxxxxxxxxx        # 订单主表 ID
-FEISHU_RECEIVER_TABLE_ID=tblxxxxxxxxxxxxxxxxxx       # 收货单位映射表 ID
+# 飞书多维表
+FEISHU_APP_ID=<应用 ID>
+FEISHU_APP_SECRET=<应用密钥>
+FEISHU_BITABLE_APP_TOKEN=<多维表 App Token>
+FEISHU_BITABLE_TABLE_ID=<订单表 Table ID>
+FEISHU_RECEIVER_TABLE_ID=<收货方表 Table ID>
 ```
 
 安装依赖：
 
 ```bash
 pip install -r requirements.txt
-pip install jionlp -i https://pypi.tuna.tsinghua.edu.cn/simple   # 省市识别
 ```
+
+> `jionlp` 会在首次运行 `main.py` 时自动检测并安装（优先清华源，失败后尝试阿里源）。
 
 ---
 
 ## 运行说明
 
-### 1. 处理邮件（随时可重复运行）
+### 步骤一：邮件解析
 
 ```bash
 python main.py
 ```
 
-作用：
-- 拉取收件箱所有邮件
-- 更新 shipping 缓存（发运方式/危险品类别）
-- 处理取消/更新/拆单指令
-- 解析新邮件中的 PDF 发货单
-- 按订单号去重后写入 `pending_orders.json`
-- 标记已处理邮件的 UID 至 `seen_mails.json`
+- 拉取邮箱全部邮件（`ALL`），自动跳过已处理 UID
+- 更新发运缓存，识别并执行业务指令
+- 将新 PDF 订单写入 `pending_orders.json`
 
-### 2. 同步多维表（飞书 Aily 定时触发）
+### 步骤二：同步多维表
 
 ```bash
 python sync_orders.py
 ```
 
-作用：
-- 读取 `pending_orders.json` 中所有 `pending` 状态的订单
-- 按业务日期分三类：今天/未来/异常
-- 排序（省份→城市→收货地址→订单号）
-- 输出 `output/orders_YYYY-MM-DD.json`
-- 幂等写入：先删除今日旧数据，再全量写入
-- 更新订单状态为 `synced` 或 `anomaly`
+- 读取 `pending_orders.json` 中所有待处理订单
+- 按状态分批处理：取消 → 改单覆盖 → 新增
+- 输出 `output/orders_YYYY-MM-DD.json` 并标记 `synced`
 
 ---
 
@@ -201,400 +164,145 @@ python sync_orders.py
 
 ### 邮件处理（main.py）
 
-#### 1. 邮件分类（`mail_filter.py`）
+```
+拉取全部邮件（最多重试 3 次）
+    │
+    ├─ 遍历一（不限已读）：更新 Shipping Cache
+    │       ├─ wenjuan 邮件（无正文 + 有 PDF）：从标题提取发运方式，写入/覆盖缓存
+    │       └─ SHIPPING_INFO 邮件：首次写入，不覆盖
+    │
+    ├─ 遍历二：识别业务指令
+    │       ├─ 含"取消/停止/作废/不用发"→ 标记 已取消
+    │       ├─ 含"更新/以此为准/重新提供"→ 解析 PDF → 标记 已更新
+    │       └─ 含"拆"且附件 >= 2 个 PDF → 原单 已更新 + 子单 拆单
+    │
+    └─ 遍历三（跳过已读 UID）：解析 PDF_ORDER
+            ├─ save_attachments → 保存 PDF 到 file/
+            ├─ PDFParser.parse_pdf + extract_order_no_coord → 文本 + 坐标层单号
+            ├─ ContentParser.parse_pdf_text → 原始字段 dict
+            ├─ FieldNormalizer.normalize → 业务清洗
+            └─ PendingOrdersManager.add_orders → 写入暂存区
+```
 
-基于**发件人白名单**匹配：
+**回复链截断**：邮件正文在送入业务指令识别前，会在"回复/转发链"起始处截断，确保指令识别仅基于新邮件内容。支持识别以下格式：
+- `-----Original Message-----`
+- Outlook/飞书英文转发头（`From: … Sent: …`）
+- 中文转发头（`发件人: … 发送时间: …`）
 
-| 类型 | 识别规则 |
-|---|---|
-| `PDF_ORDER` | 发件人包含 `"juan wen"`（白名单列表 `PDF_ORDER_CONTACTS`） |
-| `SHIPPING_INFO` | 发件人包含 `"xu jiayi"`、`"he jinlan"`、`"jhe@ppg.com"` 等（白名单列表 `SHIPPING_INFO_CONTACTS`） |
-| `UNKNOWN` | 其他，跳过 |
-
-匹配方式：发件人名称与白名单关键词做**所有部分同时存在**（`all(part in sender_lower for part in contact)`）——如 `"juan wen"` 可匹配 `"Wen, Juan"`、`"juan.wen@ppg.com"`、`"JuanWen"` 等格式。
-
-#### 2. 两轮遍历处理邮件
-
-**第一遍：更新 shipping 缓存（不受已读限制）**
-
-处理所有 `SHIPPING_INFO` 邮件，提取发运方式和危险品类别。
-
-| 发件人 | 规则 | 更新方式 |
-|---|---|---|
-| **wenjuan** 发的**所有邮件**（不限类型） | 从**主题**中取发运方式关键词（保温车/包车/零担/自提），**覆盖**已有记录的 shipping 字段 | 覆盖写入 |
-| **其他人**发的 `SHIPPING_INFO` 邮件 | 仅在全量缓存中**不存在**该订单时写入，首次写入后**永不覆盖** | 首次写入 |
-
-订单号来源（wenjuan 邮件）：
-1. 正文表格中 `DELIVERY_NO` 列（仅正文开头 200 字符）
-2. 正文开头 200 字符中的 `11` 开头的 8 位以上数字
-3. PDF 附件文件名中的 `11` 开头数字
-
-> 正文开头 200 字符限制是为了避免邮件回复链中的历史订单号污染。
-
-**发运方式解析（`content_parser.parse_shipping_mail`）：**
-- 从**主题**中匹配预设关键词：`保温车`、`包车`、`零担`、`自提`
-- 顺序匹配，先匹配到哪个就用哪个
-- 危险品类别（DG/NDG）从正文表格中查找：在数据行中扫描单独一行的 `DG` 或 `NDG`
-
-**第二遍：处理业务指令**
-
-检测邮件正文开头 200 字符：
-
-- **取消指令**：正文含 `停止`/`作废`/`不用发`/`取消` → 从正文+主题提取 `11` 开头订单号 → 标记 `sync_status = "已取消"`
-- **更新指令**：正文含 `更新`/`以此为准`/`重新提供` → 解析 PDF → 覆盖更新暂存区
-- **拆单指令**：正文或主题含 `拆` 且有 ≥2 个 PDF 附件 → 首份为原单更新，后续为新增子单（单号加 `-1` 后缀）
-
-#### 3. 第三遍：解析 PDF_ORDER（跳过已处理邮件）
-
-对类型为 `PDF_ORDER` 且未读的邮件：
-1. 保存所有 PDF 附件到 `file/pdf/`
-2. 使用 `pdfplumber` 提取文本（遇到"总毛重"停止读取后续页面）
-3. 调用 `ContentParser.parse_pdf_text()` 提取各字段
-4. 调用 `FieldNormalizer.normalize()` 进行业务清洗
-5. 补充 shipping 缓存中的发运方式和危险品类别
-6. 合并写入 `pending_orders.json`
-
-#### 4. 暂存区合并规则（`PendingOrdersManager.add_orders`）
-
-| 订单状态 | 处理方式 |
-|---|---|
-| 暂存区不存在 | 新增，状态 `pending` |
-| 状态为 `pending` | **直接覆盖**，重置 `synced_at = None` |
-| 状态为 `synced` 但内容有变化 | 更新内容，**重置为 pending**（下次 sync 会重写） |
-| 状态为 `synced` 且内容不变 | 保持 `synced`，不变 |
-| 状态为 `anomaly` | **保持不变**，不更新 |
+---
 
 ### 多维表同步（sync_orders.py）
 
-#### 业务日期过滤
-
-| 业务日期 vs 今天 | 处理方式 |
-|---|---|
-| `== 今天` | 写入多维表 |
-| `> 今天` | 继续 pending，等日期到了再处理 |
-| `< 今天` | 标记 `anomaly`，记录告警日志，跳过 |
-
-#### 排序规则
-
-待写入订单按以下字段升序排序：
-
 ```
-到货省份 → 到货城市 → 收货地址 → 订单号
+加载 pending_orders.json
+    │
+    ├─ 构建「单号 → record_id」映射（拉取多维表全量记录）
+    │
+    ├─ 已取消：batch_update_records → 仅改状态字段为"已取消"
+    ├─ 已更新（多维表已有记录）：batch_update_records → 覆盖全字段
+    ├─ pending / 拆单 / 已更新（无记录）：write_records → 新增行
+    │
+    ├─ 输出 output/orders_YYYY-MM-DD.json（按省市/地址/单号排序）
+    └─ mark_synced → 更新暂存区状态为 synced
 ```
 
-#### 幂等写入
-
-1. 先通过飞书 API 删除多维表中**下单日期 == 今天**的所有记录（基于时间戳比对）
-2. 再批量写入（每批 500 条）
-3. 仅当全部写入成功才标记 `synced`，否则保持 `pending` 下次重试
+无法解析日期的订单自动标记为 `anomaly`，跳过本次写入。
 
 ---
 
-## PDF 字段解析规则
+## 业务指令处理
 
-`content_parser.py` 定义的提取规则，遵循"忠于原文"原则，不做业务修正。
-
-### 订单号提取
-
-提取优先级从高到低：
-
-1. **"发货单号:" 后**：提取其后 100 字符内的连续 `11` 开头的 8 位以上数字；若数字被乱码打断（如 `Í11+9Ä6\6r0Ã82Î`），提取该行纯数字
-2. **"订单号:" 后**：提取字母数字组合
-3. **全文孤立数字**：搜索 `11` 开头的 6 位以上连续数字
-4. **文件名**：从 PDF 附件名中提取 `11` 开头数字（优先级最低，因偶有文件名与内部单号不一致）
-
-### 公司名提取
-
-从 PDF 中 `~`（客户字段分隔符）之后的文本提取客户公司名：
-
-**主要流程：**
-
-```
-~ → 客户公司名（第一段） → Frt bill（截断）
-                           └→ 电话：...  订单号：  （第二段，抢救截断的公司名后半段）
-```
-
-**处理策略：**
-
-- **分段**：`~` 到 `Frt bill` 之间的行，按行切分
-- **去噪**：去除 `PPG 涂料`/`庞贝捷涂料`、日期英文（July/August 等）等噪声行
-- **分隔**：PPG 行作为候选段之间的分隔符（`None`），不同公司名按此分割成独立段
-- **取最后**：多段时取最后一段（最靠近地址的那个）
-- **抢救后缀**：从 `Frt bill` 后的 `电话：` 行中抢救被截断的公司名后半段
-- **拼合**：后缀是完整公司名（含"有限公司/月结库"等标记且长度 ≥ 8）则直接使用；短尾巴则拼到前段末尾
-- **截断**：公司名中出现地址起始词（省/市/自治区等）时，截断到地址前
-- **兜底**：全部失败时取 `~` 后原始第一行（PPG 自家公司名）
-
-### 地址提取
-
-**首选：**
-- 定位标签 `收货地址:` / `交货至:` → 截取到 `订单号`/`电话`/`Waybill` 前
-
-**备用（没有明确标签时）：**
-- 定位 `客户:` 到 `运输公司`/`发货单号` 之间
-- 找到 `Frt bill`/`SBU:` 作为地址区域的起始锚点
-- 从末尾向前扫描，找到含城市行特征（如 `..., ..., 邮编, CN`）的行作为结束点
-- 清理噪声：`Frt bill SBU:`、`电话:`、`传真:`、`订单号:`、`月结库`、`月结仓`
-- 清理公司名残片：去掉地址开头独立的 `XXX有限公司`（前缀最多 15 汉字）
-
-### 联系人提取
-
-**标签定位法：**
-定位 `客户联系人` / `联系人` 标签 → 截取到 `PPG联系人`/`运输公司`/`电话` 前
-
-**兜底正则：**
-处理 PDF 排版打乱导致的字段名粘连（如 `客P户G联联系系人人`），用正则 `客.*?户.*?联.*?系.*?人` 匹配
-
-### 其他字段
-
-| 字段 | 提取方式 |
-|---|---|
-| **日期** | 正则匹配 `计划发货:` / `实际发货:` 后的 `Month DD, YYYY` 或 `YYYY/MM/DD` 格式 |
-| **重量** | `总毛重:` 后的数字（去掉小数尾部多余 0） |
-| **数量** | `Qty(数量):` 或 `数量:` 后的数字；多项时累加求和 |
-| **客户要求** | `客户要求` 到 `UN No.`/`总毛重` 之间 |
-
-### 危险品识别
-
-PDF 文本中提取危险品类别（两种格式）：
-
-**格式A（逐行旧版）：**
-```
-UN 1263
-3           ← DG 类别数字
-PG III
-```
-
-**格式B（标准发货单，一行内）：**
-```
-UN 1263 Illusion Met. YF-SGM444M/17K-C1 ...
-3 PG III > CNT(桶) ...
-```
-
-检测逻辑：
-1. 若类别数字为 `None` / `NONE` → `NDG`
-2. 若类别数字可转为浮点数（如 `3`、`4.1`、`8`）→ `DG`
-3. 兜底：全文搜索 `UN (数字|None)` 附近有无 `DG` 字样；搜索 `UN (数字|None)` 附近有无 `PG`，若中间含 `NONE` → `NDG`
+| 指令类型 | 触发关键词（新邮件正文或主题） | 处理逻辑 |
+|--------|--------------------------|---------|
+| **取消** | 停止、作废、不用发、取消 | 从正文（截断后）+ 主题提取单号，设 `sync_status = 已取消` |
+| **改单** | 更新、以此为准、重新提供 | 解析附件 PDF，用新字段覆盖暂存区，设 `sync_status = 已更新` |
+| **拆单** | 拆（正文或主题）+ 附件 ≥ 2 个 PDF | 第一个 PDF 更新原单（已更新），第二个 PDF 新增子单（拆单），子单号若与原单相同则附 `-1` 后缀 |
 
 ---
 
-## 业务字段清洗规则
+## 发运方式缓存（Shipping Cache）
 
-`business/normalizers/` 下的各 Normalizer 依次执行清洗。
-
-### 日期规范化（`order_info_normalizer.py`）
-
-将英文日期格式 `"July 14, 2026"` 转换为 `"2026/7/14"` 格式。若非标准英文日期格式则原样保留。
-
-### 客户要求清洗（`requirement_normalizer.py`）
-
-按顺序执行：
-1. 删除 PDF 提取残留的 `(cid:9)` 等控制字符标记
-2. 删除 `11` 开头的 8 位订单号
-3. 剔除英文表头噪声：`Customer Receive`、`Cust Po:`、`客户:`（含其后值，到 `Org/Warehouse` 或 `Approve` 前）、`Org/Warehouse:`、`操作人:`、`Approve`、`Prebuild...`
-4. 换行替换为空格
-5. 去除中文字符间的多余空格
-6. 多个连续空格合并为一个
-
-### 联系人清洗（`contact_normalizer.py`）
-
-**规则：** 将客户要求里出现的联系人和原 PDF 提取的客户联系人都写入，客户要求里的写在前面。
-
-**联系人提取（四种策略依次降级）：**
-
-| 策略 | 描述 | 示例 |
-|---|---|---|
-| 1. 精确提取 | 匹配 `签收人:`/`收货人:`/`联系人:` 等人名+电话组合 | `联系人：张三 13800138000` |
-| 2. 启发式 | 名字后直接跟电话号码 | `张三 13800138000` |
-| 3. 纯电话 | 退回到仅提取电话号码（无姓名） | `13800138000` |
-| 4. 碎字兜底 | 处理 PDF 排版打碎的数字（如 `张-18东0东`）→ 提取纯数字 + 纯中文 | — |
-
-支持多电话连接格式：空格、斜杠 `/`、逗号 `,` 分隔。
-
-**合并规则：**
-- customer requirement 中的联系人放在前面
-- 原 contact 字段联系人去重后追加（若与前文不重复）
-
-### 地址规范化（`address_normalizer.py`）
-
-**优先级（从高到低）：**
-
-#### 0. 特殊映射（硬编码）
-| 条件 | 映射地址 |
-|---|---|
-| 订单号 `11964715` | `昆山市千灯镇秦峰北路5号` |
-| 含 `恒基达鑫` 或（`化工五路` + `武汉`） | `湖北省武汉市洪山区化工五路1号武汉恒基达鑫国际化工仓储有限公司` |
-
-#### 1. 从客户要求（requirement）提取
-- 清理：删除订单号（`11` 开头 8 位）、批准人信息、联系人+电话
-- 用精准正则匹配 `省/市/区` 开头的地址串
-- 地址结尾词：`号`/`公司`/`集团`/`厂`/`仓库`/`基地`/`中心`/`车间`/`工业园`/`园区`/`区`/`东/南/西/北/侧`/`路`/`街`/`道`/`弄`/`口`/`楼`/`门`/`栋`/`座`/`室`/`房`/`虎`/`米`/`实业`
-- 省/市名前缀不允许含 `公司`/`有限`/`集团`/`厂`/`仓库`/`物流`/`股份` 等词，防止将公司名错误匹配为地址
-- 清理提取结果中的前缀杂音：`保温产品送到`、`第二地址发货`、`货台叫号`
-- 清理地址末尾的：联系人姓名+电话、括号注释（含 `随货`/`携带`/`COA`/`保质期`/`批次`/`需粘贴` 等关键词）、英文/数字后缀（如 `ALD096100-FVW(CC)`）
-- **兜底**：若标准地址模式匹配失败，尝试从 `交易地址:` 提取
-
-#### 2. 从原始 address 字段提取
-- 清理：订单号、`实际发货:`、`第二地址发货`、`保温产品送到`、`货台叫号`、批准人、PPG 公司名、`Frt bill`/`SBU:`、电话、`86` 区号、`订单号:`、`Waybill`
-- 保留括号括起的附属信息（如 `(麦尔总部)`）
-- 其他清理同上（联系人、括号注释、英文后缀）
-
-#### 3. 兜底
-正则无法定位省/市时，直接使用清理后的完整文本。
-
-### 收货单位匹配
-
-从飞书多维表（`FEISHU_RECEIVER_TABLE_ID`）实时拉取，通过 `get_records()` 获取所有记录。每条记录含 `收货单位`（或`收货单位简称`）和 `收货地址`。
-
-**匹配流程（四层优先级）：**
-
-| 优先级 | 方法 | 说明 | `address_exact_match` |
-|---|---|---|---|
-| 1 | **精确匹配**且**唯一收货单位** | 规范化地址（去标点符号）与多维表 `收货地址`（同样去标点）完全一致，且匹配到的都是同一收货单位名 | `一致` |
-| 2 | **精确匹配**但**多个不同收货单位** | 地址完全一致但对应多个不同收货单位名 → **取在表格中先匹配到的（排序靠上）** | `多关系对应` |
-| 3 | **DP 可分词匹配** | 精确匹配无结果时，判断多维表地址能否被拆分为最小 2 字符的子串，且每个子串都在文本池中出现 | `模糊匹配` |
-| 4 | **字符重合度兜底** | 所有匹配失败时，对全库按"收货单位名权重×2 + 地址字符重合度"评分，取最高分 | `模糊匹配` |
-
-**文本池定义：** `raw_address + " " + requirement`（原始地址全文 + 客户要求）
-
-**`address_exact_match` 字段含义：**
-| 值 | 含义 |
-|---|---|
-| `一致` | 地址在多维表中有精确匹配，且匹配到的收货单位都是同一个 |
-| `多关系对应` | 地址精确匹配到多维表中多个**不同的**收货单位，取表格中先出现的（需人工复核） |
-| `模糊匹配` | 无精确匹配，使用模糊推断或兜底匹配 |
-
-### 到货省市提取
-
-使用 `jionlp.parse_location()` 对规范化后的收货地址进行解析：
-
-- **直辖市**（北京/天津/上海/重庆）：省份和城市统一设为去掉"市"的名称
-- **自治州/地区/盟**：去掉后缀，只保留地点名称
-- **省直辖县级**（如海南省）：若无明确市，使用区县名作为城市
-
-### 发运方式与危险品类别
-
-从全局 shipping 缓存（`shipping_all.json`）按订单号查询，在 `FieldNormalizer` 和 `main.py` 中两处补充：
-
-- **发运方式**：`零担` / `包车` / `保温车` / `自提`
-- **危险品类别**：`DG` / `NDG`
-
-写入主流程：
-
-```python
-# 在 main.py 中，从 shipping 缓存补充
-if order_no in shipping_cache:
-    sc = shipping_cache[order_no]
-    normalized.setdefault("发运方式", sc.get("shipping", ""))
-    normalized.setdefault("危险品类别", sc.get("danger", ""))
-```
-
-```python
-# LogisticsNormalizer 也会执行同样的补充（保证无论谁调用都有一致结果）
-normalize_shipping(order): order["发运方式"] = shipping_cache[order_no]["shipping"]
-normalize_danger(order):   order["危险品类别"] = shipping_cache[order_no]["danger"]
-```
+- **写入规则**：
+  - `wenjuan` 发送（无正文 + 有 PDF 附件）：从**标题**提取发运方式（零担/保温车/包车/自提），**覆盖**已有记录
+  - 其他人的 `SHIPPING_INFO` 邮件：解析正文表格，**首次写入**，不覆盖
+- **存储路径**：
+  - `output/cache/shipping_YYYY-MM-DD.json`（每日快照）
+  - `output/cache/shipping_all.json`（全量历史累积，merge 写入不删历史）
+- **使用时机**：解析 PDF 后，若字段未能提取到发运方式/危险品，从缓存补充
 
 ---
 
-## 数据文件说明
+## 暂存区（PendingOrders）
 
-### `output/cache/pending_orders.json`
+文件路径：`output/cache/pending_orders.json`
 
-订单暂存区，格式：
+格式：`{ order_no: { ...字段..., sync_status, synced_at } }`
 
-```json
-{
-    "11965774": {
-        "order_no": "11965774",
-        "order_date": "2026/7/14",
-        "address": "湖北省孝感市孝南区东山头工业园区沦河二路88号",
-        "contact": "丁舒/物流部 13227183073",
-        "requirement": "...",
-        "company_name": "孝感华楷",
-        "weight": "368.600",
-        "quantity": "16",
-        "receiver": "孝感华楷",
-        "address_exact_match": "一致",
-        "到货省份": "湖北",
-        "到货城市": "孝感",
-        "发运方式": "零担",
-        "危险品类别": "DG",
-        "sync_status": "pending",
-        "synced_at": null
-    }
-}
-```
-
-`sync_status` 取值：
-
-| 值 | 含义 |
-|---|---|
+| `sync_status` | 含义 |
+|-------------|------|
 | `pending` | 尚未写入多维表 |
-| `synced` | 已成功写入多维表，`synced_at` 记录写入时间 |
-| `anomaly` | 业务日期早于今天，异常跳过 |
-| `已取消` | 通过邮件取消指令标记，保留原订单信息但不再同步 |
+| `synced` | 已成功写入多维表 |
+| `已更新` | 改单，待覆盖多维表已有记录 |
+| `已取消` | 已取消，待修改多维表状态字段 |
+| `拆单` | 拆分子单，待新增至多维表 |
+| `anomaly` | 日期无法解析，异常跳过 |
 
-### `output/cache/shipping_all.json`
+**`add_orders` 合并规则**：
 
-全量累积 shipping 缓存，以 `order_no` 为 key：
+| 已有状态 | 新数据情况 | 结果 |
+|---------|----------|------|
+| 不存在 | 任意 | 新增，`pending` |
+| `synced` | 内容有变化 | 覆盖，设为 `已更新` |
+| `synced` | 内容无变化 | 保持不变 |
+| `pending` | 任意 | 直接覆盖 |
+| `anomaly` / `已取消` | 任意 | 保持不变，不覆盖 |
 
-```json
-{
-    "11965774": {
-        "shipping": "零担",
-        "danger": "DG"
-    }
-}
+---
+
+## 业务字段清洗流水线
+
+`FieldNormalizer.normalize()` 按以下顺序执行：
+
 ```
-
-### `output/cache/shipping_YYYY-MM-DD.json`
-
-每日 shipping 缓存，每日增量写入，同时合并到 `shipping_all.json`。
-
-### `output/cache/seen_mails.json`
-
-已处理邮件 UID（按数字升序排列）：
-
-```json
-{
-    "seen_uids": ["10001", "10002", "10003"]
-}
+OrderInfoNormalizer.normalize_date      # 日期规范化（→ YYYY/MM/DD）
+RequirementNormalizer.normalize         # 客户要求去噪清洗
+ContactNormalizer.normalize             # 联系人去噪、手机号提取
+AddressNormalizer.normalize_address     # 地址规范化（精确/模糊匹配）
+AddressNormalizer.normalize_receiver    # 收货单位匹配
+AddressNormalizer.normalize_city        # 到货省市提取（jionlp NLP）
+LogisticsNormalizer.normalize_shipping  # 发运方式标准化
+LogisticsNormalizer.normalize_danger    # 危险品类别识别
 ```
 
 ---
 
 ## 多维表字段映射
 
-| 多维表字段 | 来源字段 | 转换规则 |
-|---|---|---|
-| **客户名** | 固定值 | `芜湖PPG` |
-| **单号** | `order_no` | 字符串 |
-| **订单状态** | 固定值 | `正常`（除非已取消） |
-| **下单日期** | `order_date` | 解析为 Unix 毫秒时间戳 |
-| **地址状态** | `address_exact_match` | 原值：`一致` / `多关系对应` / `模糊匹配` |
-| **收货单位** | `receiver` | 多维表收货单位映射匹配结果 |
-| **收货公司名** | `company_name` | PDF `~` 后提取的客户公司名 |
-| **收货地址** | `address` | 规范化后的中文地址 |
-| **收货人** | `contact` | 联系人姓名+电话组合 |
-| **客户要求** | `requirement` | 原文，约 600 字符 |
-| **数量** | `quantity` | 转 float（支持小数如 0.294） |
-| **重量** | `weight` | 去掉 `KG` 后缀后转 float，单位 KG |
-| **发运方式** | `发运方式` | 零担/包车/保温车/自提 |
-| **始发城市** | 固定值 | `马鞍山库` |
-| **到货城市** | `到货城市` | jionlp 自动识别 |
-| **到货省份** | `到货省份` | jionlp 自动识别 |
-| **产品特性** | `危险品类别` | DG / NDG |
+| 飞书字段 | 来源 | 说明 |
+|---------|------|------|
+| 客户名 | 固定值 `"芜湖PPG"` | |
+| 单号 | `order_no` | |
+| 订单状态 | `sync_status` 映射 | 正常/已更新/已取消/拆单 |
+| 下单日期 | `order_date` | 转为 Unix 毫秒时间戳 |
+| 地址状态 | `address_exact_match` | 精确匹配/模糊匹配 |
+| 收货单位 | `receiver` | |
+| 收货公司名 | `company_name` | |
+| 收货地址 | `address` | |
+| 收货人 | `contact` | |
+| 客户要求 | `requirement` | |
+| 数量 | `quantity` | float |
+| 重量 | `weight` | float，去 KG 后缀 |
+| 发运方式 | `发运方式` | |
+| 始发城市 | 固定值 `"马鞍山库"` | |
+| 到货城市 | `到货城市` | |
+| 到货省份 | `到货省份` | |
+| 产品特性 | `危险品类别` | |
 
 ---
 
 ## 幂等性保证
 
-| 场景 | 保证机制 |
-|---|---|
-| **同一邮件被拉取多次** | `seen_mails.json` 基于 IMAP UID 去重 |
-| **同一订单在多封邮件中出现** | `pending_orders.json` 按 `order_no` 去重（新的覆盖旧的） |
-| **订单内容有更新（重发 PDF）** | `add_orders()` 检测到内容变化后重置 `sync_status = pending`，下次 sync 重写 |
-| **Aily 同天多次触发 sync** | `sync_orders.py` 先删除多维表中今日数据（通过日期时间戳比对），再全量写入 |
-| **部分写入失败** | 只有全部成功才标记 `synced`，失败时保持 `pending`，下次重试 |
-| **订单已取消但又被解析** | 取消指令将状态设为 `已取消`，且 `anomaly` 状态保持不变不被覆盖 |
+- **邮件去重**：已处理 UID 持久化至 `output/cache/seen_mails.json`，重复运行自动跳过
+- **订单去重**：`PendingOrdersManager.add_orders` 按 `order_no` 去重，`synced` 订单内容无变化时不覆盖
+- **多维表写入**：`sync_orders.py` 每次先建立「单号 → record_id」映射，已取消/已更新走 `batch_update_records`，不产生重复行
+- **发运缓存**：其他人 SHIPPING_INFO 邮件首次写入后不覆盖，防止重复运行污染数据

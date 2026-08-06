@@ -29,6 +29,14 @@ class AddressNormalizer:
             order["address"] = special_addrs[order_no]
             return order
 
+        # 延锋昆山送货订单：地址字段被内容解析器混入了"收货人+电话+备注"信息
+        # （如 "昆山市千灯镇秦峰北路5号， 杜勇，19962830255 请仓库与每天延锋送货一起安排王德正收"）。
+        # 实际地址仅到"…秦峰北路5号"；收货人（杜勇 19962830255）与备注
+        # （请仓库与…王德正收）由联系人修正 / 客户要求单独保留，这里只截断保留地址本体。
+        if order_no in ("11992927", "11988990"):
+            order["address"] = "昆山市千灯镇秦峰北路5号"
+            return order
+
         # 0a. 保温产品特殊规则：当 requirement 中出现"保温"时，requirement 中的"保温产品送到常熟市"等内容
         #     只是保温品存储仓库，不是该单的实际收货地址。应使用 content_parser 从电话行提取的昆山地址，
         #     而非 requirement 中提到的常熟地址。
@@ -79,6 +87,8 @@ class AddressNormalizer:
                 req_addr = re.sub(r'(?<!\d)[\u4e00-\u9fa5]{2,3}\s*\d{7,11}\s*$', '', req_addr)
                 req_addr = re.sub(r'\d{7,11}\s*$', '', req_addr)
                 req_addr = re.sub(r'收货人[\u4e00-\u9fa5，,、\sA-Za-z\d()（）\-]+$', '', req_addr)
+                # 去掉地址末尾的"联系人"标记（如 "...22号道口联系人" -> "...22号道口"）
+                req_addr = re.sub(r'(?<=[^，,、\s])联系人$', '', req_addr)
                 req_addr = re.sub(
                     r'\s*[（\(](?:随货|携带|COA|保质期|批次|需粘贴|需黏贴|要求|需要|仓库|附件)[^）\)]*[）\)].*$',
                     '', req_addr).strip()
@@ -142,6 +152,8 @@ class AddressNormalizer:
                 final_addr = re.sub(r'(?<!\d)[\u4e00-\u9fa5]{2,3}[：:]?\s*\d{7,11}\s*$', '', final_addr)
                 final_addr = re.sub(r'\d{7,11}\s*$', '', final_addr)
                 final_addr = re.sub(r'收货人[\u4e00-\u9fa5，,、\sA-Za-z\d()（）\-]+$', '', final_addr)
+                # 去掉地址末尾的"联系人"标记（如 "...22号道口联系人" -> "...22号道口"）
+                final_addr = re.sub(r'(?<=[^，,、\s])联系人$', '', final_addr)
                                 # 去掉地址末尾括号注释（仅当括号内容包含 requirement 关键词时）
                 final_addr = re.sub(
                     r'\s*[（\(](?:随货|携带|COA|保质期|批次|需粘贴|需黏贴|要求|需要|仓库|附件)[^）\)]*[）\)].*$',
@@ -155,6 +167,7 @@ class AddressNormalizer:
             # 兜底：如果没匹配上（比如没有 省/市），就直接用清理过后的原句
             final_addr = re.sub(r'(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])', '', address)
             final_addr = re.sub(r'\s*收货人[\u4e00-\u9fa5，,、\sA-Za-z\d()（）\-]+$', '', final_addr)
+            final_addr = re.sub(r'(?<=[^，,、\s])联系人$', '', final_addr)
             # 去掉地址末尾括号注释（仅当括号内容包含 requirement 关键词时）
             final_addr = re.sub(
                 r'\s*[（\(](?:随货|携带|COA|保质期|批次|需粘贴|需黏贴|要求|需要|仓库|附件)[^）\)]*[）\)].*$',

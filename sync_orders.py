@@ -5,9 +5,9 @@ sync_orders.py — 多维表写入入口
   1. 加载 pending_orders.json 暂存区
   2. 处理 已取消 的订单 → 按订单号匹配多维表记录，修改订单状态为"已取消"
   3. 处理 已更新 且已写入的订单（跨天）→ 按订单号匹配多维表记录，覆盖字段+状态=已更新
-  4. 按业务日期过滤（pending + 今天/昨天的 已更新 → 写入，未来 → 暂存，其他 → 异常）
+  4. 所有 pending/拆单/已更新 订单不区分日期，全部写入（不再过滤今天/昨天）
   5. 对待写入订单排序，输出 orders_YYYY-MM-DD.json
-  6. 幂等写入：先删除多维表中今天的旧数据，再写入新数据
+  6. 直接写入，不删除旧数据（由调用方负责幂等）
   7. 更新暂存区状态
 """
 
@@ -128,9 +128,8 @@ def build_order_no_to_record_id(client, app_token, table_id):
 
 def sync():
     today = date.today()
-    yesterday = today - timedelta(days=1)
     today_str = today.strftime("%Y/%m/%d")
-    logger.info(f"=== 同步 {today_str}（今天+昨天） ===")
+    logger.info(f"=== 同步写入（忽略日期，全部 pending 订单写入） ===")
 
     client = BitableClient(APP_ID, APP_SECRET)
 
@@ -165,166 +164,113 @@ def sync():
         done = client.batch_update_records(APP_TOKEN, TABLE_ID, cancel_updates)
         logger.info(f"已取消：成功修改 {done}/{len(cancel_updates)} 条")
 
-    # ── 4. 处理 已更新（跨天修改——多维表中已有对应记录） ──────────────
-    #     前提：已更新 且 业务日期 < 今天（表明是之前写入的，需要修改多维表）
+    # ── 4. 处理 已更新（改单——多维表中已有对应记录） ──────────────────
+    #     只要多维表中有对应记录，不区分日期，一律覆盖内容＋状态=已更新
     update_modifies = []
     for order in all_updated:
-        biz_date = parse_order_date(order)
         order_no = order.get("order_no", "")
         record_id = order_to_record.get(order_no)
-        if biz_date and biz_date < today and record_id:
+        if record_id:
             fields = order_to_feishu_record(order, status="已更新")
             update_modifies.append({
                 "record_id": record_id,
                 "fields": fields
             })
-            logger.info(f"[更新] {order_no} 跨天修改多维表")
+            logger.info(f"[更新] {order_no} 覆盖多维表已有记录")
 
     if update_modifies:
         done = client.batch_update_records(APP_TOKEN, TABLE_ID, update_modifies)
-        logger.info(f"已更新（跨天修改）：成功修改 {done}/{len(update_modifies)} 条")
+        logger.info(f"已更新（改单覆盖）：成功修改 {done}/{len(update_modifies)} 条")
 
-    # ── 5. 按日期分组过滤 ────────────────────────────────────────────
-    # 昨日写入：昨天 pending + 昨天 已更新（走写入，不是跨天修改）
-    # 今日写入：今天 pending + 今天 已更新
-    yesterday_orders = []
-    today_orders     = []
-    future_orders    = []
-    anomalies        = []
-
-    # 收集待写入订单
+    # ── 5. 收集所有待写入订单（不区分日期）────────────────────────────
     # pending / 拆单 状态的订单直接加入
     all_candidates = list(all_pending) + list(all_split)
-    # 已更新 状态的订单只在今天或昨天时才加入（跨天的已更新走跨天修改不走写入）
+    # 已更新 状态：跨天修改（多维表中有记录）已在步骤4处理；
+    # 这里把 所有已更新 也加入写入候选（若多维表无对应记录则需新写入）
     for order in all_updated:
-        biz_date = parse_order_date(order)
-        if biz_date in (today, yesterday):
+        order_no = order.get("order_no", "")
+        if order_no not in order_to_record:
             all_candidates.append(order)
 
-    for order in all_candidates:
-        biz_date = parse_order_date(order)
-        if biz_date is None:
-            anomalies.append(order)
-        elif biz_date == yesterday:
-            yesterday_orders.append(order)
-        elif biz_date == today:
-            today_orders.append(order)
-        elif biz_date > today:
-            future_orders.append(order)
-        else:
-            anomalies.append(order)
+    # 过滤无法解析日期的异常订单
+    anomalies     = [o for o in all_candidates if parse_order_date(o) is None]
+    write_orders  = [o for o in all_candidates if parse_order_date(o) is not None]
 
     if anomalies:
         anomaly_nos = [o.get("order_no") for o in anomalies]
         PendingOrdersManager.mark_anomaly(anomaly_nos)
+        logger.warning(f"无法解析日期的异常订单 {len(anomalies)} 条，已标记 anomaly")
 
-    if not yesterday_orders and not today_orders:
-        logger.info(f"无待写入（昨日 0，今日 0，未来 {len(future_orders)}，异常 {len(anomalies)}），退出")
+    if not write_orders:
+        logger.info(f"无待写入订单（异常 {len(anomalies)} 条），退出")
         return
 
-    logger.info(f"待写入：昨日 {len(yesterday_orders)} 条，今日 {len(today_orders)} 条")
+    logger.info(f"待写入：共 {len(write_orders)} 条（忽略日期）")
 
-    # ── 6. 排序（按日期分别排序） ──────────────────────────────────────
+    # ── 6. 排序 ──────────────────────────────────────────────────────
     def sort_key(o):
         return (o.get("到货省份", ""), o.get("到货城市", ""),
                 o.get("address", ""), o.get("order_no", ""))
 
-    yesterday_orders.sort(key=sort_key)
-    today_orders.sort(key=sort_key)
+    write_orders.sort(key=sort_key)
 
-    # ── 7. 输出 orders.json（所有待写入按日期分组） ──────────────────
+    # ── 7. 输出 orders.json ──────────────────────────────────────────
     json_path = os.path.join("output", f"orders_{today.isoformat()}.json")
     os.makedirs("output", exist_ok=True)
     try:
         all_sorted_orders = []
-        for label, group in [("昨日", yesterday_orders), ("今日", today_orders)]:
-            for o in group:
-                fs = order_to_feishu_record(o)
-                all_sorted_orders.append({
-                    "单号":       o.get("order_no", ""),
-                    "到货省份":   o.get("到货省份", ""),
-                    "到货城市":   o.get("到货城市", ""),
-                    "收货地址":   o.get("address", ""),
-                    "收货单位":   o.get("receiver", ""),
-                    "收货人":     o.get("contact", ""),
-                    "重量":       fs.get("重量", ""),
-                    "数量":       fs.get("数量", ""),
-                    "发运方式":   o.get("发运方式", ""),
-                    "危险品类别": o.get("危险品类别", ""),
-                    "客户要求":   o.get("requirement", ""),
-                    "日期":       label,
-                })
+        for o in write_orders:
+            fs = order_to_feishu_record(o)
+            all_sorted_orders.append({
+                "单号":       o.get("order_no", ""),
+                "到货省份":   o.get("到货省份", ""),
+                "到货城市":   o.get("到货城市", ""),
+                "收货地址":   o.get("address", ""),
+                "收货单位":   o.get("receiver", ""),
+                "收货人":     o.get("contact", ""),
+                "重量":       fs.get("重量", ""),
+                "数量":       fs.get("数量", ""),
+                "发运方式":   o.get("发运方式", ""),
+                "危险品类别": o.get("危险品类别", ""),
+                "客户要求":   o.get("requirement", ""),
+                "下单日期":   o.get("order_date", ""),
+            })
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(all_sorted_orders, f, ensure_ascii=False, indent=2)
         logger.info(f"已输出 {json_path}（{len(all_sorted_orders)} 条）")
     except Exception as e:
         logger.error(f"输出 orders.json 失败: {e}")
 
-    # ── 8. 写入飞书多维表，按日期分别写入 ────────────────────────────
-    #     规则：昨日订单直接写入（多维表中没有旧数据需删除）
-    #           今日订单先删今日旧数据再写入（幂等保证）
+    # ── 8. 写入飞书多维表（直接写入，不区分日期） ────────────────────
     all_synced_nos = []
     BATCH_SIZE = 500
 
-    # 8a. 写入昨日订单（直接写入，不删数据）
-    if yesterday_orders:
-        yesterday_records = []
-        for o in yesterday_orders:
-            s = o.get("sync_status", "")
-            if s == "拆单":
-                status = "拆单"
-            elif s == "已更新":
-                status = "已更新"
-            else:
-                status = "正常"
-            yesterday_records.append(order_to_feishu_record(o, status=status))
-
-        y_success = 0
-        for i in range(0, len(yesterday_records), BATCH_SIZE):
-            batch = yesterday_records[i: i + BATCH_SIZE]
-            ok = client.write_records(APP_TOKEN, TABLE_ID, batch)
-            if ok:
-                y_success += len(batch)
-            else:
-                logger.error(f"昨日订单第 {i // BATCH_SIZE + 1} 批写入失败，已中止")
-                break
-
-        if y_success == len(yesterday_records):
-            all_synced_nos.extend([o.get("order_no") for o in yesterday_orders])
-            logger.info(f"昨日写入完成：{y_success} 条")
+    write_records = []
+    for o in write_orders:
+        s = o.get("sync_status", "")
+        if s == "拆单":
+            status = "拆单"
+        elif s == "已更新":
+            status = "已更新"
         else:
-            logger.warning(f"昨日部分写入失败（{y_success}/{len(yesterday_records)}），暂留待下次重试")
+            status = "正常"
+        write_records.append(order_to_feishu_record(o, status=status))
 
-    # 8b. 写入今日订单（先删今日旧数据，再写入）
-    if today_orders:
-        client.delete_records_by_date(APP_TOKEN, TABLE_ID, today_str)
-
-        today_records = []
-        for o in today_orders:
-            s = o.get("sync_status", "")
-            if s == "拆单":
-                status = "拆单"
-            elif s == "已更新":
-                status = "已更新"
-            else:
-                status = "正常"
-            today_records.append(order_to_feishu_record(o, status=status))
-
-        t_success = 0
-        for i in range(0, len(today_records), BATCH_SIZE):
-            batch = today_records[i: i + BATCH_SIZE]
-            ok = client.write_records(APP_TOKEN, TABLE_ID, batch)
-            if ok:
-                t_success += len(batch)
-            else:
-                logger.error(f"今日订单第 {i // BATCH_SIZE + 1} 批写入失败，已中止")
-                break
-
-        if t_success == len(today_records):
-            all_synced_nos.extend([o.get("order_no") for o in today_orders])
-            logger.info(f"今日写入完成：{t_success} 条")
+    success_total = 0
+    for i in range(0, len(write_records), BATCH_SIZE):
+        batch = write_records[i: i + BATCH_SIZE]
+        ok = client.write_records(APP_TOKEN, TABLE_ID, batch)
+        if ok:
+            success_total += len(batch)
         else:
-            logger.warning(f"今日部分写入失败（{t_success}/{len(today_records)}），暂留待下次重试")
+            logger.error(f"第 {i // BATCH_SIZE + 1} 批写入失败，已中止")
+            break
+
+    if success_total == len(write_records):
+        all_synced_nos.extend([o.get("order_no") for o in write_orders])
+        logger.info(f"写入完成：{success_total} 条")
+    else:
+        logger.warning(f"部分写入失败（{success_total}/{len(write_records)}），暂留待下次重试")
 
     # ── 9. 更新暂存区状态 ────────────────────────────────────────────
     if all_synced_nos:

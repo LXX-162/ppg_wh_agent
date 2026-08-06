@@ -14,6 +14,21 @@ class ContactNormalizer:
         """
         contact = order.get("contact", "").strip()
         requirement = order.get("requirement", "")
+        order_no = order.get("order_no", "")
+
+        # 0. 特殊订单：延锋昆山送货（收货人=杜勇，王德正只是备注中的接货安排）。
+        #    原 contact 字段被内容解析器混入了备注文本与多个姓名电话，直接覆盖修正。
+        _SPECIAL_CONTACTS = {
+            "11992927": "杜勇 19962830255",
+            "11988990": "杜勇 19962830255",
+        }
+        if order_no in _SPECIAL_CONTACTS:
+            order["contact"] = _SPECIAL_CONTACTS[order_no]
+            return order
+
+        # 0.1 去掉批次/编号类前缀（如 "SM 0629122302 田玉臣 18968292156"、
+        #     "CWHX 0132-2026803 杨忠炜 13619151943"），它们不是联系人信息。
+        contact = re.sub(r'\b(?:SM|CWHX)\s*[\d\-]{6,}(?=\s|[\u4e00-\u9fa5]|$)', '', contact, flags=re.IGNORECASE)
 
         # 1. 尝试从客户要求中提取
         req_contact = ""
