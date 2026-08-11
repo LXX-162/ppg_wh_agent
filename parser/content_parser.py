@@ -182,12 +182,45 @@ class ContentParser:
         else:
             return sub_text.strip()
 
+    # 订单号模式：精确 8 位，1[1-9] 开头（兼容 11/12/13/15 等所有未来格式）。
+    # 拆单格式：8位数字 + 连字符 + 尾缀数字，如 12002169-1。
+    # (?<!\d) + (?![\d]) 双向边界保证不会从 11 位手机号内截取 8 位子串。
+    # 手机号恰好 11 位，与 8 位订单号在长度上天然隔离，无需额外过滤。
+    _ORDER_NO_RE = re.compile(r'(?<!\d)1[1-9]\d{6}(?:-\d+)?(?!\d)')
+
     @staticmethod
-    def extract_order_no(text: str, filename: str = "", coord_order_no: str = "") -> str:
+    def _is_order_no(s: str) -> bool:
+        """
+        判断一个字符串是否是合法订单号（而非电话号码等）。
+        合法格式：
+          - 普通订单号：精确 8 位，以 1[1-9] 开头（如 11965813、12002169、15xxxxxx）
+          - 拆单订单号：8 位 + 连字符 + 尾缀数字（如 12002169-1、11965813-2）
+        排除：
+          - 手机号（11 位）、固话（含连字符或 0 开头）等均不符合 8 位精确长度要求
+        """
+        # 拆单格式：8位-数字
+        if re.fullmatch(r'1[1-9]\d{6}-\d+', s):
+            return True
+        # 普通格式：精确 8 位
+        if re.fullmatch(r'1[1-9]\d{6}', s):
+            return True
+        return False
+
+    @classmethod
+    def _search_order_no(cls, text: str) -> str:
+        """在文本中搜索第一个合法订单号（含拆单格式），返回匹配字符串或空串。"""
+        for m in cls._ORDER_NO_RE.finditer(text):
+            candidate = m.group(0)
+            if cls._is_order_no(candidate):
+                return candidate
+        return ""
+
+    @classmethod
+    def extract_order_no(cls, text: str, filename: str = "", coord_order_no: str = "") -> str:
         # 0. PDF 内部"发货单号"坐标层提取的单号最权威。
         #    用户明确：当 PDF 内部读出的单号与文件名单号冲突时，以 PDF 内部为准（文件名可能出错）。
-        #    因此只要坐标层能取到合法订单号（11 开头的连续数字），就直接采用，不再让文件名覆盖它。
-        if coord_order_no and re.fullmatch(r'11\d{6,}', coord_order_no):
+        #    因此只要坐标层能取到合法订单号，就直接采用，不再让文件名覆盖它。
+        if coord_order_no and cls._is_order_no(coord_order_no):
             logger.info(f"提取 [单号] (来自 PDF 坐标层) -> 成功: True | 内容: {coord_order_no}")
             return coord_order_no
 
@@ -195,28 +228,26 @@ class ContentParser:
         match = re.search(r'发货单号\s*[:：]([\s\S]{0,100})', text)
         if match:
             chunk = match.group(1)
-            # 策略A: 连续的11开头的长数字 (处理跨行但数字连续的情况，例如换行后的 11965813)
-            m2 = re.search(r'(11\d{6,})', chunk)
-            if m2:
-                result = m2.group(1)
-                logger.info(f"提取 [单号] (来自文本发货单号-连续) -> 成功: True | 内容: {result}")
-                return result
-                
+            # 策略A: 连续的合法订单号数字 (处理跨行但数字连续的情况)
+            found = cls._search_order_no(chunk)
+            if found:
+                logger.info(f"提取 [单号] (来自文本发货单号-连续) -> 成功: True | 内容: {found}")
+                return found
+
             # 策略B: 数字被乱码打断的情况，比如 Í11+9Ä6\6r0Ã82Î -> 11966082
             first_line = chunk.split('\n')[0]
             digits_only = re.sub(r'\D', '', first_line)
-            if digits_only.startswith('11') and len(digits_only) >= 8:
+            if cls._is_order_no(digits_only):
                 # ── 交叉校验：乱码重构的数字可能与文件名中的真号不一致 ──
                 # 场景：pdfplumber 常把发货单号区渲染成如 "Í 11+9Ä6m767)22Î" 的乱码，
                 #       去掉非数字字符后得到 119676722（混入杂音数字），而正确单号是 11967722。
                 #       文件名（如 91_Delivery Docket - 11967722.pdf）通常保留原始正确单号。
-                # 规则：若文件名中存在明确的 11 开头单号：
+                # 规则：若文件名中存在明确的合法订单号：
                 #        - 与文本重构结果一致 → 用文本；
                 #        - 不一致 → 认为文本被杂音污染，采用文件名单号（并告警）。
                 if filename:
-                    fn_match = re.search(r'(11\d{6,})', filename)
-                    if fn_match:
-                        fn_no = fn_match.group(1)
+                    fn_no = cls._search_order_no(filename)
+                    if fn_no:
                         if fn_no == digits_only:
                             logger.info(f"提取 [单号] (文本乱码过滤+文件名一致) -> 成功: True | 内容: {digits_only}")
                             return digits_only
@@ -228,29 +259,32 @@ class ContentParser:
                             return fn_no
                 logger.info(f"提取 [单号] (来自文本发货单号-乱码过滤) -> 成功: True | 内容: {digits_only}")
                 return digits_only
-            
-        # 2. 次选兜底逻辑：订单号
+
+        # 2. 次选兜底逻辑：从「订单号:」字段提取
+        # 注意：PDF 中「订单号」字段有时是内部 SO 单号（如 423172），并非发货单号。
+        # 只有通过 _is_order_no 校验的值才被采用。
         match = re.search(r'订单号[:：]\s*([A-Za-z0-9_-]+)', text)
         if match:
             result = match.group(1)
-            logger.info(f"提取 [单号] (来自文本订单号) -> 成功: True | 内容: {result}")
-            return result
-            
-        # 3. 再次选逻辑：文本里孤立的 11 开头的数字
-        match = re.search(r'(11\d{6,})', text)
-        if match:
-            result = match.group(1)
-            logger.info(f"提取 [单号] (来自孤立数字) -> 成功: True | 内容: {result}")
-            return result
-            
+            if cls._is_order_no(result.split('-')[0]):   # 兼容拆单格式的数字部分
+                logger.info(f"提取 [单号] (来自文本订单号) -> 成功: True | 内容: {result}")
+                return result
+            else:
+                logger.info(f"提取 [单号] (来自文本订单号-跳过非法值 {result!r})")
+
+        # 3. 再次选逻辑：文本里孤立的合法订单号数字
+        found = cls._search_order_no(text)
+        if found:
+            logger.info(f"提取 [单号] (来自孤立数字) -> 成功: True | 内容: {found}")
+            return found
+
         # 4. 最后才从文件名提取（因为用户反映有时候文件名命名会和里面不一致，因此优先级降到最低）
         if filename:
-            match = re.search(r'(11\d{6,})', filename)
-            if match:
-                result = match.group(1)
-                logger.info(f"提取 [单号] (来自文件名) -> 成功: True | 内容: {result}")
-                return result
-                
+            found = cls._search_order_no(filename)
+            if found:
+                logger.info(f"提取 [单号] (来自文件名) -> 成功: True | 内容: {found}")
+                return found
+
         logger.info(f"提取 [单号] -> 成功: False | 内容: ")
         return ""
 
@@ -819,8 +853,8 @@ class ContentParser:
             ["批准人", "UN No.", "UN None", "Description", "Item Ord.Qty", "Shipped Qty", "总毛重"]
         )
         if result:
-            # 去掉末尾紧跟的订单号（如 "自提 11973589" → "自提"）
-            result = re.sub(r'\s+11\d{6,}$', '', result).strip()
+            # 去掉末尾紧跟的订单号（普通格式如 "自提 11973589"，或拆单格式如 "自提 12002169-1"）
+            result = re.sub(r'\s+1[1-9]\d{6}(?:-\d+)?$', '', result).strip()
         logger.info(f"提取 [客户要求] -> 成功: {bool(result)} | 内容: {result}")
         return result
 

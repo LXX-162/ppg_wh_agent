@@ -334,7 +334,9 @@ def main():
                         parsed = _parse_pdf_docket(pdf_path)
                         normalized = FieldNormalizer.normalize(parsed)
                         pdf_order_no = normalized.get("order_no", "").strip()
-                        if not pdf_order_no or len(pdf_order_no) < 4:
+                        # 严格校验：必须是合法的 8 位发货单号，过滤 SO 单号等非法值
+                        if not pdf_order_no or not ContentParser._is_order_no(pdf_order_no.split('-')[0]):
+                            logger.info(f"  → 跳过非法订单号 {pdf_order_no!r}（更新指令）")
                             continue
 
                         # 过滤无效解析结果：必须至少有地址、重量或数量等核心字段
@@ -464,7 +466,9 @@ def main():
                 normalized = FieldNormalizer.normalize(parsed)
 
                 order_no = normalized.get("order_no", "").strip()
-                if not order_no or len(order_no) < 4 or not any(c.isdigit() for c in order_no):
+                # 严格校验：必须是合法的 8 位发货单号（或拆单格式），过滤 SO 单号等非法值
+                if not order_no or not ContentParser._is_order_no(order_no.split('-')[0]):
+                    logger.info(f"  → 跳过非法订单号 {order_no!r}（来自 {os.path.basename(pdf_path)}）")
                     continue
 
                 # 过滤无效解析结果：必须至少有地址、重量或数量等核心字段
