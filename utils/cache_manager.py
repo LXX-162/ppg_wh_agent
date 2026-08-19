@@ -204,9 +204,18 @@ class PendingOrdersManager:
                 new_entry["synced_at"] = None
                 pending[order_no] = new_entry
                 changed += 1
-            elif existing.get("sync_status") in ("anomaly", "已取消"):
-                # 异常/已取消 的订单保持不变
+            elif existing.get("sync_status") == "anomaly":
+                # 业务日期异常的订单，保持不变，不接受新数据覆盖
                 pass
+            elif existing.get("sync_status") == "已取消":
+                # 被取消后又收到新 PDF → 重新激活为 pending，允许重新写入飞书
+                if not is_caller_status_specified:
+                    new_entry["sync_status"] = "pending"
+                new_entry["synced_at"] = None
+                pending[order_no] = new_entry
+                changed += 1
+                logger.info(f"[{order_no}] 已取消订单收到新数据，重新激活为 pending")
+
             elif existing.get("sync_status") == "synced":
                 # 检查内容是否有变化（比较除状态字段外的核心字段）
                 _IGNORE = {"sync_status", "synced_at"}

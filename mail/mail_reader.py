@@ -29,7 +29,7 @@ class MailReader:
                 pass
             self.mail = None
 
-    def fetch_recent(self, limit=20, search_criteria="ALL"):
+    def fetch_recent(self, limit=20, search_criteria="ALL", skip_uids: set = None):
         if not self.mail:
             self.connect()
 
@@ -49,26 +49,40 @@ class MailReader:
         uids = response[0].split()
         logger.info(f"搜索条件 '{search_criteria}' 匹配到邮件数量: {len(uids)}")
 
+        # ── 客户端过滤已读 UID，只下载未读邮件 ──────────────────────────
+        # SEARCH 返回的只是 UID 文本列表（很快）；真正耗时的是 FETCH（下载邮件正文）。
+        # 在这里提前过滤，可以避免重复下载已处理过的历史邮件，无需限制搜索日期范围。
+        if skip_uids:
+            before = len(uids)
+            uids = [uid for uid in uids if uid.decode('utf-8') not in skip_uids]
+            skipped = before - len(uids)
+            logger.info(f"过滤已读后，待下载未读邮件: {len(uids)} 封（跳过已读 {skipped} 封）")
+
         recent_uids = uids[-limit:] if limit else uids
         mails = []
 
         for uid in recent_uids:
-            status, fetch_data = self.mail.uid("FETCH", uid, "(RFC822)")
-            if status != "OK":
-                continue
+            try:
+                status, fetch_data = self.mail.uid("FETCH", uid, "(RFC822)")
+                if status != "OK":
+                    continue
 
-            for response_part in fetch_data:
-                if isinstance(response_part, tuple):
-                    msg_bytes = response_part[1]
-                    # 使用 default policy 自动处理 header 解码等
-                    msg = email.message_from_bytes(msg_bytes, policy=policy.default)
-                    
-                    mails.append({
-                        "uid": uid.decode('utf-8'),
-                        "sender": str(msg.get("From", "")),
-                        "subject": str(msg.get("Subject", "")),
-                        "date": str(msg.get("Date", "")),
-                        "message": msg
-                    })
-        
+                for response_part in fetch_data:
+                    if isinstance(response_part, tuple):
+                        msg_bytes = response_part[1]
+                        # 使用 default policy 自动处理 header 解码等
+                        msg = email.message_from_bytes(msg_bytes, policy=policy.default)
+
+                        mails.append({
+                            "uid": uid.decode('utf-8'),
+                            "sender": str(msg.get("From", "")),
+                            "subject": str(msg.get("Subject", "")),
+                            "date": str(msg.get("Date", "")),
+                            "message": msg
+                        })
+            except imaplib.IMAP4.error as e:
+                logger.warning(f"FETCH UID={uid.decode('utf-8', errors='replace')} 失败（跳过）: {e}")
+            except Exception as e:
+                logger.warning(f"解析 UID={uid.decode('utf-8', errors='replace')} 邮件时出错（跳过）: {e}")
+
         return mails

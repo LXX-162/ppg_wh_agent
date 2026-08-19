@@ -1,4 +1,26 @@
 import re
+import sys as _sys
+import os as _os
+
+# ── jionlp 模块级预热 ──────────────────────────────────────────────────
+# jionlp 首次调用 parse_location 时会加载完整行政区划词典，耗时较长。
+# 在模块加载时统一完成初始化，后续所有调用直接复用，避免每次解析订单都卡顿。
+_jio = None
+_saved_stdout = _sys.stdout
+try:
+    _sys.stdout = open(_os.devnull, 'w', encoding='utf-8')  # 压制 jionlp 初始化打印
+    import jionlp as _jio_module
+    _jio_module.parse_location("上海市")   # 触发词典懒加载，后续调用秒级响应
+    _jio = _jio_module
+except Exception:
+    _jio = None
+finally:
+    try:
+        _sys.stdout.close()
+    except Exception:
+        pass
+    _sys.stdout = _saved_stdout
+del _saved_stdout
 
 class AddressNormalizer:
     """业务修正规则：地址与相关实体（收货单位、省市区）"""
@@ -206,17 +228,9 @@ class AddressNormalizer:
             return cls._region_cache[text_dense]
 
         result = ("", "", "")
-        import sys
-        old_stdout = sys.stdout
-        sys.stdout = open("NUL", "w")
-        try:
-            # pyrefly: ignore [missing-import]
-            import jionlp as jio
-        except Exception:
+        jio = _jio
+        if jio is None:
             return "", "", ""
-        finally:
-            sys.stdout.close()
-            sys.stdout = old_stdout
 
         try:
             res = jio.parse_location(text_dense)
@@ -415,17 +429,7 @@ class AddressNormalizer:
     @classmethod
     def normalize_city(cls, order: dict) -> dict:
         """业务修正规则：城市提取"""
-        import sys, os
-        old_stdout = sys.stdout
-        sys.stdout = open(os.devnull, 'w')
-        try:
-            # pyrefly: ignore [missing-import]
-            import jionlp as jio
-        except Exception:
-            jio = None
-        finally:
-            sys.stdout.close()
-            sys.stdout = old_stdout
+        jio = _jio
 
         address = order.get("address", "")
         if jio and address:
