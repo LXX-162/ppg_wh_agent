@@ -61,7 +61,7 @@ from datetime import datetime
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 from utils.config import load_config
-from mail.mail_reader import MailReader
+from mail.mail_reader import MailReader, _heartbeat
 from mail.mail_filter import MailFilter
 from mail.email_saver import save_attachments
 from parser.pdf_parser import PDFParser
@@ -183,11 +183,12 @@ def main():
         logger.info("[3/4] 拉取邮件（IMAP 连接中，请稍候...）")
         for attempt in range(3):
             try:
-                mails = reader.fetch_recent(
-                    limit=None,
-                    search_criteria='ALL',
-                    skip_uids=seen_uids,   # 客户端过滤，只下载未读
-                )
+                with _heartbeat(interval=30, label="拉取邮件 FETCH"):
+                    mails = reader.fetch_recent(
+                        limit=None,
+                        search_criteria='ALL',
+                        skip_uids=seen_uids,   # 客户端过滤，只下载未读
+                    )
                 fetch_ok = True
                 break
             except Exception as e:

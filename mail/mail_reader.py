@@ -2,9 +2,34 @@ import imaplib
 import email
 from email import policy
 import logging
+import threading
+from contextlib import contextmanager
+from datetime import datetime
 from utils.config import load_config
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _heartbeat(interval: int = 30, label: str = "等待 IMAP 响应"):
+    """在 with 块执行期间，每隔 interval 秒打印一条心跳日志。
+    用于防止飞书等平台因长时间无输出而误判进程闲置并将其终止。
+    """
+    stop_evt = threading.Event()
+
+    def _beat():
+        elapsed = 0
+        while not stop_evt.wait(timeout=interval):
+            elapsed += interval
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"{ts} [INFO] ⏳ {label}（已等待 {elapsed}s）...", flush=True)
+
+    t = threading.Thread(target=_beat, daemon=True, name="imap-heartbeat")
+    t.start()
+    try:
+        yield
+    finally:
+        stop_evt.set()
 
 class MailReader:
     def __init__(self):
@@ -17,9 +42,11 @@ class MailReader:
 
     def connect(self):
         logger.info(f"  IMAP SSL 连接中: {self.host}:{self.port}...")
-        self.mail = imaplib.IMAP4_SSL(self.host, self.port)
+        with _heartbeat(interval=30, label=f"IMAP SSL 握手 {self.host}:{self.port}"):
+            self.mail = imaplib.IMAP4_SSL(self.host, self.port)
         logger.info(f"  SSL 握手完成，登录用户: {self.user}")
-        self.mail.login(self.user, self.password)
+        with _heartbeat(interval=30, label=f"IMAP 登录 {self.user}"):
+            self.mail.login(self.user, self.password)
         logger.info("  登录成功")
 
     def disconnect(self):
