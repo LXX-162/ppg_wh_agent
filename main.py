@@ -166,8 +166,11 @@ def main():
     logger.info("=== PPG WH Agent — 邮件处理 ===")
 
     # ── 1. 加载已读邮件记录 & shipping 全量缓存 ──────────────────────
+    logger.info("[1/4] 加载本地缓存...")
     seen_uids = SeenMailsManager.load()
     shipping_cache = CacheManager.load_cache()
+    logger.info(f"  已读邮件记录: {len(seen_uids)} 条，shipping 缓存: {len(shipping_cache)} 条")
+    logger.info("[2/4] 初始化邮件连接...")
     reader = MailReader()
 
     try:
@@ -177,6 +180,7 @@ def main():
         # 无需限制日期范围，历史邮件第一次处理后即标记 seen，后续运行自动跳过。
         fetch_ok = False
         mails = []
+        logger.info("[3/4] 拉取邮件（IMAP 连接中，请稍候...）")
         for attempt in range(3):
             try:
                 mails = reader.fetch_recent(
@@ -190,6 +194,7 @@ def main():
                 logger.warning(f"拉取邮件第 {attempt + 1} 次失败: {e}")
                 reader.disconnect()
                 if attempt < 2:
+                    logger.info(f"  3 秒后重试（第 {attempt + 2} 次）...")
                     time.sleep(3)
 
         if not fetch_ok:
@@ -200,7 +205,7 @@ def main():
             logger.info("没有新的未读邮件，退出")
             return
 
-        logger.info(f"本次需处理未读邮件: {len(mails)} 封")
+        logger.info(f"[4/4] 本次需处理未读邮件: {len(mails)} 封")
 
         # ── 3. 统一处理未读邮件（一遍完成全部任务） ─────────────────
         # 每封邮件可能同时触发多个动作（更新 shipping 缓存 / 取消指令 / PDF解析），

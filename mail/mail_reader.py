@@ -16,10 +16,11 @@ class MailReader:
         self.mail = None
 
     def connect(self):
-        logger.info("连接邮箱...")
+        logger.info(f"  IMAP SSL 连接中: {self.host}:{self.port}...")
         self.mail = imaplib.IMAP4_SSL(self.host, self.port)
+        logger.info(f"  SSL 握手完成，登录用户: {self.user}")
         self.mail.login(self.user, self.password)
-        logger.info("登录成功")
+        logger.info("  登录成功")
 
     def disconnect(self):
         if self.mail:
@@ -61,7 +62,10 @@ class MailReader:
         recent_uids = uids[-limit:] if limit else uids
         mails = []
 
-        for uid in recent_uids:
+        total = len(recent_uids)
+        for i, uid in enumerate(recent_uids):
+            if total > 10 and i % 10 == 0:
+                logger.info(f"  下载邮件进度: {i}/{total}...")
             try:
                 status, fetch_data = self.mail.uid("FETCH", uid, "(RFC822)")
                 if status != "OK":
@@ -84,5 +88,6 @@ class MailReader:
                 logger.warning(f"FETCH UID={uid.decode('utf-8', errors='replace')} 失败（跳过）: {e}")
             except Exception as e:
                 logger.warning(f"解析 UID={uid.decode('utf-8', errors='replace')} 邮件时出错（跳过）: {e}")
+        logger.info(f"  下载完成，共 {len(mails)} 封")
 
         return mails
